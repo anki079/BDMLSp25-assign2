@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Model checkpoints and weights
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+saved_models/
+checkpoints/
+
+# Data files
+data/
+datasets/
+*.csv
+*.json
+*.jsonl
+*.txt
+*.tsv
+
+# Logs
+logs/
+*.log
+wandb/
+runs/
+tensorboard_logs/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Large files that might be generated during training
+*.cache
+*.tar.gz
+*.zip
+
+# Specific to this assignment
+/scratch/BDML25SP/
+results/
+output/
