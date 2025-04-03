@@ -20,9 +20,9 @@ The goal of the assignment is to implement these techniques on 2 GPUs and achiev
 
 ## Deliverables
 1. A report documenting:
-   a. Distributed training techniques used.
-   b. Training performance (time per epoch) and evaluation results.
-   c. Step by step guide on how to run the training code.
+    a. Distributed training techniques used.
+    b. Training performance (time per epoch) and evaluation results.
+    c. Step by step guide on how to run the training code.
 2. Code access on HPC
 
 ## Evaluation
