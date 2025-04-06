@@ -5,6 +5,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from transformers import LlamaForCausalLM, AutoTokenizer, LlamaConfig
 from torch.cuda.amp import autocast, GradScaler
+from accelerate import init_empty_weights
+from transformers import BitsAndBytesConfig
 import time
 import argparse
 
@@ -89,11 +91,19 @@ def train(model_path, train_file, test_file, epochs, batch_size):
         config = LlamaConfig.from_pretrained(model_path)
         print(f"[Rank {rank}] Model config loaded: {config.hidden_size} hidden size, {config.num_hidden_layers} layers")
 
-        model = LlamaForCausalLM.from_pretrained(model_path)
-        print(f"[Rank {rank}] Model loaded.")
+        quant_config = BitsAndBytesConfig(
+            load_in_8bit=True,   # or load_in_4bit=True
+            llm_int8_threshold=6.0
+        )
 
-        model.gradient_checkpointing_enable()
-        print(f"[Rank {rank}] Gradient checkpointing enabled.")
+        model = LlamaForCausalLM.from_pretrained(
+            model_path,
+            quantization_config=quant_config
+        )
+        print(f"[Rank {rank}] Model loaded with 8 bit quantization.")
+
+        model.gradient_checkpointing_disable()
+        # print(f"[Rank {rank}] Gradient checkpointing enabled.")
 
         total_params = sum(p.numel() for p in model.parameters())
         print(f"[Rank {rank}] Total parameters: {total_params:,}")
