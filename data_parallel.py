@@ -31,12 +31,12 @@ class TextDataset(Dataset):
         
         return item
 
-def setup(rank, num_gpus):
+def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
     
     # initialize the process group
-    dist.init_process_group("nccl", rank=rank, num_gpus=num_gpus)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
     
     # set device
     torch.cuda.set_device(rank)
@@ -44,12 +44,12 @@ def setup(rank, num_gpus):
 def cleanup():
     dist.destroy_process_group()
 
-def train(rank, num_gpus, model_path, train_file, test_file, epochs, batch_size):
+def train(rank, world_size, model_path, train_file, test_file, epochs, batch_size):
     # setup process group
-    setup(rank, num_gpus)
+    setup(rank, world_size)
     
     if rank == 0:
-        print(f"Starting distributed training on {num_gpus} GPUs")
+        print(f"Starting distributed training on {world_size} GPUs")
     
     # load model and tokenizer
     try:
@@ -88,7 +88,7 @@ def train(rank, num_gpus, model_path, train_file, test_file, epochs, batch_size)
         return
     
     # create sampler and dataloader
-    train_sampler = DistributedSampler(train_dataset, num_replicas=num_gpus, rank=rank, shuffle=True)
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
@@ -181,7 +181,7 @@ def main():
     args = parser.parse_args()
     
     # get the number of available GPUs
-    num_gpus = torch.cuda.device_count()
+    world_size = torch.cuda.device_count()
     
     # file paths relative to the current directory
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -189,7 +189,7 @@ def main():
     train_file = os.path.join(current_dir, "train.txt")
     test_file = os.path.join(current_dir, "test.txt")
     
-    train(args.local_rank, num_gpus, model_path, train_file, test_file, args.epochs, args.batch_size)
+    train(args.local_rank, world_size, model_path, train_file, test_file, args.epochs, args.batch_size)
 
 if __name__ == "__main__":
     main()
