@@ -8,13 +8,15 @@ import time
 import argparse
 
 class TextDataset(Dataset):
-    def __init__(self, file_path, tokenizer, max_length=512):
+    def __init__(self, file_path, tokenizer, max_length=512, max_lines=None):
         self.tokenizer = tokenizer
         self.max_length = max_length
-        
+
         with open(file_path, 'r', encoding='utf-8') as f:
-            self.lines = [line.strip() for line in f if line.strip()]
-            
+            lines = [line.strip() for line in f if line.strip()]
+            if max_lines:
+                lines = lines[:max_lines]
+        self.lines = lines
         print(f"Loaded {len(self.lines)} examples from {file_path}")
     
     def __len__(self):
@@ -47,27 +49,33 @@ def cleanup():
 def train(rank, world_size, model_path, train_file, test_file, epochs, batch_size):
     # setup process group
     setup(rank, world_size)
-    
-    if rank == 0:
-        print(f"Starting distributed training on {world_size} GPUs")
+
+    print(f"[Rank {rank}] Starting training setup...")
+
+    # if rank == 0:
+    #     print(f"Starting distributed training on {world_size} GPUs")
     
     # load model and tokenizer
     try:
         tokenizer = LlamaTokenizer.from_pretrained(model_path)
-        if rank == 0:
-            print("Tokenizer loaded successfully")
-        
+        # if rank == 0:
+        #     print("Tokenizer loaded successfully")
+        print(f"[Rank {rank}] Tokenizer loaded.")
+
         config = LlamaConfig.from_pretrained(model_path)
-        if rank == 0:
-            print(f"Model config loaded: {config.hidden_size} hidden size, {config.num_hidden_layers} layers")
-            
+        # if rank == 0:
+        #     print(f"Model config loaded: {config.hidden_size} hidden size, {config.num_hidden_layers} layers")
+        print(f"[Rank {rank}] Model config loaded: {config.hidden_size} hidden size, {config.num_hidden_layers} layers")    
         model = LlamaForCausalLM.from_pretrained(model_path)
-        if rank == 0:
-            print("Model loaded successfully")
-            total_params = sum(p.numel() for p in model.parameters())
-            print(f"Total parameters: {total_params:,}")
+        print(f"[Rank {rank}] Model loaded.")
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Total parameters: {total_params:,}")
+        # if rank == 0:
+        #     print("Model loaded successfully")
+        #     total_params = sum(p.numel() for p in model.parameters())
+        #     print(f"Total parameters: {total_params:,}")
     except Exception as e:
-        print(f"Error loading model: {e}")
+        print(f"[Rank {rank}] Error loading model: {e}")
         cleanup()
         return
     
@@ -83,7 +91,7 @@ def train(rank, world_size, model_path, train_file, test_file, epochs, batch_siz
         train_dataset = TextDataset(train_file, tokenizer)
         test_dataset = TextDataset(test_file, tokenizer)
     except Exception as e:
-        print(f"Error loading datasets: {e}")
+        print(f"[Rank {rank}] Error loading datasets: {e}")
         cleanup()
         return
     
@@ -94,12 +102,14 @@ def train(rank, world_size, model_path, train_file, test_file, epochs, batch_siz
         batch_size=batch_size, 
         sampler=train_sampler,
         pin_memory=True,
-        num_workers=4
+        num_workers=0 # down from 4
     )
     
+    print(f"[Rank {rank}] DataLoader ready. Beginning training loop...")
+
     # setup optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.01)
-    
+
     # training loop
     total_time = 0
     for epoch in range(epochs):
@@ -109,6 +119,7 @@ def train(rank, world_size, model_path, train_file, test_file, epochs, batch_siz
         total_loss = 0
         
         for step, batch in enumerate(train_loader):
+            print(f"[Rank {rank}] Step {step}")
             # move batch to device
             batch = {k: v.to(device) for k, v in batch.items()}
             
