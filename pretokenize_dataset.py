@@ -2,24 +2,27 @@ import os
 import argparse
 from datasets import load_dataset
 from transformers import AutoTokenizer, DataCollatorForLanguageModeling
+from itertools import islice
 
 def main():
-
-    parser = argparse.ArgumentParser(description="Pretokenize dataset for distributed LlaMa fine-tuning")
+    parser = argparse.ArgumentParser(description="Pretokenize dataset for LLM training")
     parser.add_argument("--max_examples", type=int, default=None, 
                         help="Maximum number of examples to process for testing")
     parser.add_argument("--test_mode", action="store_true", 
                         help="If set, save to test directory instead of main directory")
     parser.add_argument("--max_length", type=int, default=128)
     args = parser.parse_args()
-
+    
+    # Use streaming if max_examples is set
+    streaming = args.max_examples is not None
+    
     data_files = {"train": "./train.txt", "test": "./test.txt"}
-    # tokenized_data_dir = "./tokenized_data"
+    max_length = args.max_length
     model_dir = "./llama-hf"
-    # max_length = 128
-
+    
+    # Determine output directory based on test mode
     if args.test_mode:
-        tokenized_data_dir = "tokenized_data_test"
+        tokenized_data_dir = "./tokenized_data_test"
         print(f"Running in TEST MODE: Will save to {tokenized_data_dir}")
     else:
         tokenized_data_dir = "./tokenized_data"
@@ -32,23 +35,34 @@ def main():
             print("Exiting without overwriting.")
             return
         print(f"Will overwrite {tokenized_data_dir}")
-        
+    
     os.makedirs(tokenized_data_dir, exist_ok=True)
     
-    print("Loading raw dataset...")
-    dataset = load_dataset("text", data_files=data_files)
-    print(f"Train size: {len(dataset['train'])}, Test size: {len(dataset['test'])}")
-
-    # Subsample if max_examples is provided
-    if args.max_examples:
-        print(f"Taking subset of {args.max_examples} examples from train set")
-        dataset["train"] = dataset["train"].select(range(min(args.max_examples, len(dataset["train"]))))
+    print(f"Loading {'subset of ' if streaming else ''}raw dataset...")
+    
+    # Load dataset with streaming option if max_examples is set
+    dataset = load_dataset("text", data_files=data_files, streaming=streaming)
+    
+    # If streaming, take only the number of examples needed
+    if streaming:
+        # For train set
+        train_subset = list(islice(dataset["train"], args.max_examples))
+        # For test set - use 10% or at least 100 examples
+        test_examples = max(min(args.max_examples // 10, 100), 1)
+        test_subset = list(islice(dataset["test"], test_examples))
         
-        # For test set, use 10% of max_examples or all available examples
-        test_examples = max(args.max_examples // 10, 100)  # At least 100 test examples
-        test_examples = min(test_examples, len(dataset["test"]))  # But not more than available
-        print(f"Taking subset of {test_examples} examples from test set")
-        dataset["test"] = dataset["test"].select(range(test_examples))
+        # Convert back to regular dataset
+        from datasets import Dataset
+        dataset = {
+            "train": Dataset.from_dict({k: [example[k] for example in train_subset] 
+                                      for k in train_subset[0].keys()}),
+            "test": Dataset.from_dict({k: [example[k] for example in test_subset] 
+                                     for k in test_subset[0].keys()})
+        }
+        print(f"Took subset of {len(dataset['train'])} examples from train set")
+        print(f"Took subset of {len(dataset['test'])} examples from test set")
+    
+    print(f"Train size: {len(dataset['train'])}, Test size: {len(dataset['test'])}")
     
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -56,25 +70,53 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
     
     def tokenize_function(examples):
-        outputs = tokenizer(examples["text"], truncation=True, padding="max_length", max_length=max_length, return_tensors="pt")
+        outputs = tokenizer(
+            examples["text"], 
+            truncation=True, 
+            padding="max_length", 
+            max_length=max_length, 
+            return_tensors="pt"
+        )
         outputs["labels"] = outputs["input_ids"].clone()
         return outputs
 
     print("Tokenizing dataset...")
-    tokenized_datasets = dataset.map(tokenize_function, batched=True, num_proc=4, remove_columns=["text"])
+    # Use appropriate num_proc based on dataset size
+    num_proc = 1 if streaming else 4
+    
+    tokenized_datasets = dataset["train"].map(
+        tokenize_function, 
+        batched=True, 
+        num_proc=num_proc, 
+        remove_columns=["text"]
+    )
+    
+    # Create a DatasetDict with both splits
+    from datasets import DatasetDict
+    tokenized_datasets = DatasetDict({
+        "train": tokenized_datasets,
+        "test": dataset["test"].map(
+            tokenize_function, 
+            batched=True, 
+            num_proc=num_proc, 
+            remove_columns=["text"]
+        )
+    })
+    
     print("Number of tokenized train examples:", len(tokenized_datasets["train"]))
+    print("Number of tokenized test examples:", len(tokenized_datasets["test"]))
 
     print(f"Saving tokenized dataset to {tokenized_data_dir}...")
     tokenized_datasets.save_to_disk(tokenized_data_dir)
-
-    # metadata file to track what was saved
+    
+    # Create a metadata file to track what was saved
     with open(os.path.join(tokenized_data_dir, "metadata.txt"), "w") as f:
         f.write(f"Test mode: {args.test_mode}\n")
         f.write(f"Max examples: {args.max_examples}\n")
         f.write(f"Train size: {len(tokenized_datasets['train'])}\n")
         f.write(f"Test size: {len(tokenized_datasets['test'])}\n")
-        f.write(f"Max sequence length: {args.max_length}\n")
-
+        f.write(f"Max sequence length: {max_length}\n")
+    
     print("Pretokenization done!")
 
 if __name__ == "__main__":
