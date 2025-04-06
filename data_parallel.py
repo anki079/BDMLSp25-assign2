@@ -299,7 +299,9 @@ def train(model_path, train_file, test_file, epochs, batch_size):
 
     # 3. Load model/tokenizer
     try:
-        tokenizer =AutoTokenizer.from_pretrained(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
         print(f"[Rank {rank}] Tokenizer loaded.")
 
         config = LlamaConfig.from_pretrained(model_path)
