@@ -244,6 +244,11 @@ class TextDataset(Dataset):
     
     def __getitem__(self, idx):
         text = self.lines[idx]
+        print(f"Tokenizer type: {type(self.tokenizer)}")  # Debug line
+        if not callable(self.tokenizer):
+            print(f"ERROR: self.tokenizer is not callable: {self.tokenizer}")
+        # Fallback or error handling here
+    
         encodings = self.tokenizer(
             text, 
             max_length=self.max_length, 
