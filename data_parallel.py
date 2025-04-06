@@ -189,6 +189,9 @@ def main():
     parser.add_argument("--local_rank", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--train_file", type=str, required=True)
+    parser.add_argument("--test_file", type=str, required=True)
+
     args = parser.parse_args()
     
     # get the number of available GPUs
@@ -197,8 +200,8 @@ def main():
     # file paths relative to the current directory
     current_dir = os.path.dirname(os.path.abspath(__file__))
     model_path = os.path.join(current_dir, "llama-hf")
-    train_file = os.path.join(current_dir, "train.txt")
-    test_file = os.path.join(current_dir, "test.txt")
+    train_file = os.path.join(current_dir, args.train_file)
+    test_file = os.path.join(current_dir, args.test_file)
     
     train(args.local_rank, world_size, model_path, train_file, test_file, args.epochs, args.batch_size)
 
