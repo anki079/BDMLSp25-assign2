@@ -121,6 +121,8 @@ def train(local_rank, world_size, model_path, train_file, test_file, epochs, bat
         total_loss = 0
         
         for step, batch in enumerate(train_loader):
+            if step >= 2:
+                break #limit batches for testing
             print(f"[Rank {rank}] Step {step}")
             # move batch to device
             batch = {k: v.to(device) for k, v in batch.items()}
@@ -160,6 +162,9 @@ def train(local_rank, world_size, model_path, train_file, test_file, epochs, bat
         print(f"Average time per epoch: {total_time/epochs:.2f}s")
     
     cleanup()
+    if rank == 0:
+        print("✅ Test run completed successfully.")
+
 
 def compute_perplexity(model, dataset, device):
     test_loader = DataLoader(dataset, batch_size=4)
