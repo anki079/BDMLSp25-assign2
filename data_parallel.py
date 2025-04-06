@@ -223,7 +223,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
-from transformers import LlamaForCausalLM, LlamaTokenizer, LlamaConfig
+from transformers import LlamaForCausalLM, AutoTokenizer, LlamaConfig
 import time
 import argparse
 
@@ -299,7 +299,7 @@ def train(model_path, train_file, test_file, epochs, batch_size):
 
     # 3. Load model/tokenizer
     try:
-        tokenizer = LlamaTokenizer.from_pretrained(model_path)
+        tokenizer =AutoTokenizer.from_pretrained(model_path)
         print(f"[Rank {rank}] Tokenizer loaded.")
 
         config = LlamaConfig.from_pretrained(model_path)
