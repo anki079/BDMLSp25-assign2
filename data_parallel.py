@@ -1,4 +1,3 @@
-# data_parallel.py
 import os
 import torch
 import torch.distributed as dist
