@@ -1,9 +1,10 @@
+# data_parallel.py
 import os
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
-from transformers import LlamaForCausalLM, LlamaTokenizer
+from transformers import LlamaForCausalLM, LlamaTokenizer, LlamaConfig
 import time
 import argparse
 
@@ -12,9 +13,10 @@ class TextDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         
-        # Read the text file
         with open(file_path, 'r', encoding='utf-8') as f:
             self.lines = [line.strip() for line in f if line.strip()]
+            
+        print(f"Loaded {len(self.lines)} examples from {file_path}")
     
     def __len__(self):
         return len(self.lines)
@@ -24,47 +26,82 @@ class TextDataset(Dataset):
         encodings = self.tokenizer(text, max_length=self.max_length, padding="max_length", 
                                   truncation=True, return_tensors="pt")
         
-        # Remove the batch dimension added by the tokenizer
         item = {key: val.squeeze(0) for key, val in encodings.items()}
+        
+        item['labels'] = item['input_ids'].clone()
+        
         return item
 
-def setup(rank, world_size):
+def setup(rank, num_gpus):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
     
-    # Initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    # initialize the process group
+    dist.init_process_group("nccl", rank=rank, num_gpus=num_gpus)
+    
+    # set device
+    torch.cuda.set_device(rank)
     
 def cleanup():
     dist.destroy_process_group()
 
-def train(rank, world_size, model_path, train_file, test_file, epochs):
-    # Setup process group
-    setup(rank, world_size)
+def train(rank, num_gpus, model_path, train_file, test_file, epochs, batch_size):
+    # setup process group
+    setup(rank, num_gpus)
     
-    # Load model and tokenizer
-    tokenizer = LlamaTokenizer.from_pretrained(model_path)
-    model = LlamaForCausalLM.from_pretrained(model_path)
+    if rank == 0:
+        print(f"Starting distributed training on {num_gpus} GPUs")
     
-    # Move model to the appropriate device
+    # load model and tokenizer
+    try:
+        tokenizer = LlamaTokenizer.from_pretrained(model_path)
+        if rank == 0:
+            print("Tokenizer loaded successfully")
+        
+        config = LlamaConfig.from_pretrained(model_path)
+        if rank == 0:
+            print(f"Model config loaded: {config.hidden_size} hidden size, {config.num_hidden_layers} layers")
+            
+        model = LlamaForCausalLM.from_pretrained(model_path)
+        if rank == 0:
+            print("Model loaded successfully")
+            total_params = sum(p.numel() for p in model.parameters())
+            print(f"Total parameters: {total_params:,}")
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        cleanup()
+        return
+    
+    # move model to the appropriate device
     device = torch.device(f"cuda:{rank}")
     model = model.to(device)
     
-    # Wrap model with DDP
-    model = DDP(model, device_ids=[rank])
+    # wrap model with DDP
+    model = DDP(model, device_ids=[rank], find_unused_parameters=False)
     
-    # Load datasets
-    train_dataset = TextDataset(train_file, tokenizer)
-    test_dataset = TextDataset(test_file, tokenizer)
+    # load datasets
+    try:
+        train_dataset = TextDataset(train_file, tokenizer)
+        test_dataset = TextDataset(test_file, tokenizer)
+    except Exception as e:
+        print(f"Error loading datasets: {e}")
+        cleanup()
+        return
     
-    # Create sampler and dataloader
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
-    train_loader = DataLoader(train_dataset, batch_size=4, sampler=train_sampler)
+    # create sampler and dataloader
+    train_sampler = DistributedSampler(train_dataset, num_replicas=num_gpus, rank=rank, shuffle=True)
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        sampler=train_sampler,
+        pin_memory=True,
+        num_workers=4
+    )
     
-    # Setup optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
+    # setup optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.01)
     
-    # Training loop
+    # training loop
     total_time = 0
     for epoch in range(epochs):
         epoch_start_time = time.time()
@@ -72,31 +109,38 @@ def train(rank, world_size, model_path, train_file, test_file, epochs):
         train_sampler.set_epoch(epoch)
         total_loss = 0
         
-        for batch in train_loader:
-            # Move batch to device
+        for step, batch in enumerate(train_loader):
+            # move batch to device
             batch = {k: v.to(device) for k, v in batch.items()}
             
-            # Forward pass
-            outputs = model(input_ids=batch["input_ids"], 
-                           attention_mask=batch["attention_mask"], 
-                           labels=batch["input_ids"])
+            # fwd pass
+            outputs = model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                labels=batch["labels"]
+            )
             
             loss = outputs.loss
             total_loss += loss.item()
             
-            # Backward pass
+            # bckwd pass
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            
+            # display progress
+            if rank == 0 and step % 10 == 0:
+                print(f"Epoch {epoch+1}/{epochs} | Batch {step}/{len(train_loader)} | Loss: {loss.item():.4f}")
         
         epoch_end_time = time.time()
         epoch_time = epoch_end_time - epoch_start_time
         total_time += epoch_time
         
-        if rank == 0:  # Only print metrics on the main process
-            print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(train_loader):.4f}, Time: {epoch_time:.2f}s")
+        if rank == 0:  # only print metrics on the main process
+            avg_loss = total_loss / len(train_loader)
+            print(f"Epoch {epoch+1}/{epochs} complete | Avg Loss: {avg_loss:.4f} | Time: {epoch_time:.2f}s")
     
-    # Evaluation
+    # eval
     if rank == 0:
         model.eval()
         perplexity = compute_perplexity(model, test_dataset, device)
@@ -106,36 +150,47 @@ def train(rank, world_size, model_path, train_file, test_file, epochs):
     cleanup()
 
 def compute_perplexity(model, dataset, device):
-    model.eval()
     test_loader = DataLoader(dataset, batch_size=4)
+    model.eval()
     total_loss = 0
-    total_tokens = 0
+    total_length = 0
     
     with torch.no_grad():
         for batch in test_loader:
             batch = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(input_ids=batch["input_ids"], 
-                           attention_mask=batch["attention_mask"], 
-                           labels=batch["input_ids"])
+            outputs = model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                labels=batch["labels"]
+            )
             
             loss = outputs.loss
             total_loss += loss.item() * batch["input_ids"].size(0)
-            total_tokens += batch["input_ids"].size(0)
+            total_length += batch["input_ids"].size(0)
     
-    return torch.exp(torch.tensor(total_loss / total_tokens)).item()
+    # compute perplexity
+    avg_loss = total_loss / total_length
+    perplexity = torch.exp(torch.tensor(avg_loss)).item()
+    
+    return perplexity
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--batch_size", type=int, default=2)
     args = parser.parse_args()
     
-    world_size = torch.cuda.device_count()
-    model_path = "./llama-hf"
-    train_file = "./train.txt"
-    test_file = "./test.txt"
+    # get the number of available GPUs
+    num_gpus = torch.cuda.device_count()
     
-    train(args.local_rank, world_size, model_path, train_file, test_file, args.epochs)
+    # file paths relative to the current directory
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(current_dir, "llama-hf")
+    train_file = os.path.join(current_dir, "train.txt")
+    test_file = os.path.join(current_dir, "test.txt")
+    
+    train(args.local_rank, num_gpus, model_path, train_file, test_file, args.epochs, args.batch_size)
 
 if __name__ == "__main__":
     main()
