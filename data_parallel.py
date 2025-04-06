@@ -33,22 +33,24 @@ class TextDataset(Dataset):
         
         return item
 
-def setup(rank, world_size):
+def setup(local_rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '29500'
     
     # initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    dist.init_process_group("nccl", rank=local_rank, world_size=world_size)
     
     # set device
-    torch.cuda.set_device(rank)
+    torch.cuda.set_device(local_rank)
     
 def cleanup():
     dist.destroy_process_group()
 
-def train(rank, world_size, model_path, train_file, test_file, epochs, batch_size):
+def train(local_rank, world_size, model_path, train_file, test_file, epochs, batch_size):
     # setup process group
-    setup(rank, world_size)
+    setup(local_rank, world_size)
+    rank = dist.get_rank()  # Proper rank after process group initialized
+    device = torch.device(f"cuda:{local_rank}")
 
     print(f"[Rank {rank}] Starting training setup...")
 
@@ -80,7 +82,7 @@ def train(rank, world_size, model_path, train_file, test_file, epochs, batch_siz
         return
     
     # move model to the appropriate device
-    device = torch.device(f"cuda:{rank}")
+    # device = torch.device(f"cuda:{rank}")
     model = model.to(device)
     
     # wrap model with DDP
