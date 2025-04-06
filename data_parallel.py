@@ -288,11 +288,11 @@ from datasets import load_dataset, load_from_disk
 def main():
 
     parser = argparse.ArgumentParser(description="Distributed LlaMa fine tuning")
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--max-length", type=int, default=128)
+    parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
-    parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data", help="Directory containing tokenized dataset")
+    parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data")
     # parser.add_argument("--max-steps", type=int, default=5000)
     args = parser.parse_args()
     

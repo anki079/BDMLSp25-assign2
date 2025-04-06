@@ -10,12 +10,13 @@ def main():
                         help="Maximum number of examples to process for testing")
     parser.add_argument("--test_mode", action="store_true", 
                         help="If set, save to test directory instead of main directory")
+    parser.add_argument("--max_length", type=int, default=128)
     args = parser.parse_args()
 
     data_files = {"train": "./train.txt", "test": "./test.txt"}
     # tokenized_data_dir = "./tokenized_data"
     model_dir = "./llama-hf"
-    max_length = 128
+    # max_length = 128
 
     if args.test_mode:
         tokenized_data_dir = "tokenized_data_test"
@@ -66,14 +67,14 @@ def main():
     print(f"Saving tokenized dataset to {tokenized_data_dir}...")
     tokenized_datasets.save_to_disk(tokenized_data_dir)
 
-    # Create a metadata file to track what was saved
+    # metadata file to track what was saved
     with open(os.path.join(tokenized_data_dir, "metadata.txt"), "w") as f:
         f.write(f"Test mode: {args.test_mode}\n")
         f.write(f"Max examples: {args.max_examples}\n")
         f.write(f"Train size: {len(tokenized_datasets['train'])}\n")
         f.write(f"Test size: {len(tokenized_datasets['test'])}\n")
-        f.write(f"Max sequence length: {max_length}\n")
-        
+        f.write(f"Max sequence length: {args.max_length}\n")
+
     print("Pretokenization done!")
 
 if __name__ == "__main__":
