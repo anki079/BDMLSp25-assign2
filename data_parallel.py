@@ -291,31 +291,40 @@ def main():
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--max-length", type=int, default=128)
+    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
+    parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data", help="Directory containing tokenized dataset")
     # parser.add_argument("--max-steps", type=int, default=5000)
     args = parser.parse_args()
     
+    # print logs only on the main process
+    is_main_process = args.local_rank in [-1, 0]
+
     model_dir = "./llama-hf"
     output_dir = "./checkpoints-llama-data-parallelism"
     os.makedirs(output_dir, exist_ok=True)
-    tokenized_data_dir = "./tokenized_data"
+    tokenized_data_dir = args.tokenized_data_dir
 
-    print("Loading tokenizer for data collator...")
+    if is_main_process:
+        print("Loading tokenizer for data collator...")
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
     
-    print("Loading tokenized datasets...")
+    if is_main_process:
+        print("Loading tokenized datasets...")
     tokenized_datasets = load_from_disk(tokenized_data_dir)
 
     train_dataset = tokenized_datasets["train"]
     test_dataset = tokenized_datasets["test"]
 
-    print("Loading model...")
+    if is_main_process:
+        print("Loading model...")
     model = AutoModelForCausalLLM.from_pretrained(model_dir)
 
-    print("Setting up training arguments...")
+    if is_main_process:
+        print("Setting up training arguments...")
     training_args = TrainingArguments(
         output_dir=output_dir,
         per_device_train_batch_size=args.batch_size,
@@ -338,7 +347,8 @@ def main():
         save_total_limit=1
     )
 
-    print("Creating trainer...")
+    if is_main_process:
+        print("Creating trainer...")
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -347,29 +357,32 @@ def main():
         data_collator=data_collator
     )
 
-    print("Starting training...")
+    if is_main_process:
+        print("Starting training...")
     start_time = time.time()
     trainer.train()
     end_time = time.time()
     time_per_epoch = (end_time - start_time)/training_args.num_train_epochs
-    print(f"Time per epoch: {time_per_epoch} seconds")
-
-    print("Saving model...")
-    trainer.save_model(output_dir)
-
-    print("Evaluating model...")
-    eval_results = trainer.evaluate()
-    eval_loss = eval_results["eval_loss"]
-    perplexity = math.exp(eval_loss)
-    print(f"Eval Loss: {eval_loss}, Perplexity: {perplexity}")
     
-    with open(os.path.join(output_dir, "eval_results_DP.txt"), "w") as f:
-        f.write("***** Distributed Fine Tuning with Data Parallelism Results *****")
-        f.write(f"Time per epoch: {time_per_epoch}\n")
-        f.write(f"Eval Loss: {eval_loss}\n")
-        f.write(f"Perplexity: {perplexity}\n")
-    
-    print("Distributed fine-tuning using data parallelism complete!")
+    if is_main_process:
+        print(f"Time per epoch: {time_per_epoch} seconds")
+
+        print("Saving model...")
+        trainer.save_model(output_dir)
+
+        print("Evaluating model...")
+        eval_results = trainer.evaluate()
+        eval_loss = eval_results["eval_loss"]
+        perplexity = math.exp(eval_loss)
+        print(f"Eval Loss: {eval_loss}, Perplexity: {perplexity}")
+        
+        with open(os.path.join(output_dir, "eval_results_DP.txt"), "w") as f:
+            f.write("***** Distributed Fine Tuning with Data Parallelism Results *****")
+            f.write(f"Time per epoch: {time_per_epoch}\n")
+            f.write(f"Eval Loss: {eval_loss}\n")
+            f.write(f"Perplexity: {perplexity}\n")
+        
+        print("Distributed fine-tuning using data parallelism complete!")
 
 if __name__ == "__main__":
     main()
