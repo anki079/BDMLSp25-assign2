@@ -88,8 +88,8 @@ def train(rank, world_size, model_path, train_file, test_file, epochs, batch_siz
     
     # load datasets
     try:
-        train_dataset = TextDataset(train_file, tokenizer)
-        test_dataset = TextDataset(test_file, tokenizer)
+        train_dataset = TextDataset(train_file, tokenizer, max_lines=20)
+        test_dataset = TextDataset(test_file, tokenizer, max_lines=10)
     except Exception as e:
         print(f"[Rank {rank}] Error loading datasets: {e}")
         cleanup()
