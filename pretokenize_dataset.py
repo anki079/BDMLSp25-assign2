@@ -82,8 +82,9 @@ def main():
 
     print("Tokenizing dataset...")
     # Use appropriate num_proc based on dataset size
-    num_proc = 1 if streaming else 4
-    
+    # num_proc = 1 if streaming else 4
+    num_proc=1
+
     tokenized_datasets = dataset["train"].map(
         tokenize_function, 
         batched=True, 
