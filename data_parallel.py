@@ -273,82 +273,246 @@
 # if __name__ == "__main__":
 #     main()
 
-#max length = 128
+# max length = 128
+# data_parallel.py
+# import os
+# import torch
+# import math
+# import time
+# import argparse
+# # import torch.distributed as dist
+# import bitsandbytes as bnb
+# # from torch.nn.parallel import DistributedDataParallel as DDP
+# from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer, DataCollatorForLanguageModeling
+# from datasets import load_dataset, load_from_disk
+
+# def main():
+
+#     parser = argparse.ArgumentParser(description="Distributed LlaMa fine tuning")
+#     parser.add_argument("--batch_size", type=int, default=1)
+#     parser.add_argument("--epochs", type=int, default=1)
+#     parser.add_argument("--max_length", type=int, default=128)
+#     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
+#     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data")
+#     # parser.add_argument("--max-steps", type=int, default=5000)
+#     args = parser.parse_args()
+    
+#     # print logs only on the main process
+#     is_main_process = args.local_rank in [-1, 0]
+
+#     model_dir = "./llama-hf"
+#     output_dir = "./checkpoints-llama-data-parallelism"
+#     os.makedirs(output_dir, exist_ok=True)
+#     tokenized_data_dir = args.tokenized_data_dir
+
+#     if is_main_process:
+#         print("Loading tokenizer for data collator...")
+#     tokenizer = AutoTokenizer.from_pretrained(model_dir)
+#     if tokenizer.pad_token is None:
+#         tokenizer.pad_token = tokenizer.eos_token
+
+#     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    
+#     if is_main_process:
+#         print("Loading tokenized datasets...")
+#     tokenized_datasets = load_from_disk(tokenized_data_dir)
+
+#     train_dataset = tokenized_datasets["train"]
+#     test_dataset = tokenized_datasets["test"]
+
+#     if is_main_process:
+#         print("Loading model...")
+#     model = AutoModelForCausalLM.from_pretrained(model_dir)
+
+#     if is_main_process:
+#         print("Setting up training arguments...")
+#     training_args = TrainingArguments(
+#         output_dir=output_dir,
+#         per_device_train_batch_size=args.batch_size,
+#         per_device_eval_batch_size=args.batch_size,
+#         num_train_epochs=args.epochs,
+#         evaluation_strategy="epoch",
+#         logging_strategy="steps",
+#         logging_steps=5000,
+#         save_strategy="epoch",
+#         # save_steps=500,
+#         bf16=True,
+#         bf16_full_eval=True,
+#         optim="paged_adamw_8bit",
+#         ddp_find_unused_parameters=False,
+#         learning_rate=5e-4,
+#         warmup_ratio=0.05,
+#         weight_decay=0.01,
+#         group_by_length=True,
+#         report_to="none",
+#         save_total_limit=1
+#     )
+
+#     if is_main_process:
+#         print("Creating trainer...")
+#     trainer = Trainer(
+#         model=model,
+#         args=training_args,
+#         train_dataset=train_dataset,
+#         eval_dataset=test_dataset,
+#         data_collator=data_collator
+#     )
+
+#     if is_main_process:
+#         print("Starting training...")
+#     start_time = time.time()
+#     trainer.train()
+#     end_time = time.time()
+#     time_per_epoch = (end_time - start_time)/training_args.num_train_epochs
+    
+#     if is_main_process:
+#         print(f"Time per epoch: {time_per_epoch} seconds")
+
+#         print("Saving model...")
+#         trainer.save_model(output_dir)
+
+#         print("Evaluating model...")
+#         eval_results = trainer.evaluate()
+#         eval_loss = eval_results["eval_loss"]
+#         perplexity = math.exp(eval_loss)
+#         print(f"Eval Loss: {eval_loss}, Perplexity: {perplexity}")
+        
+#         with open(os.path.join(output_dir, "eval_results_DP.txt"), "w") as f:
+#             f.write("***** Distributed Fine Tuning with Data Parallelism Results *****")
+#             f.write(f"Time per epoch: {time_per_epoch}\n")
+#             f.write(f"Eval Loss: {eval_loss}\n")
+#             f.write(f"Perplexity: {perplexity}\n")
+        
+#         print("Distributed fine-tuning using data parallelism complete!")
+
+# if __name__ == "__main__":
+#     main()
+
+
+# data_parallel.py
 import os
-import torch
 import math
+import torch
 import time
 import argparse
-# import torch.distributed as dist
 import bitsandbytes as bnb
-# from torch.nn.parallel import DistributedDataParallel as DDP
-from transformers import AutoTokenizer, AutoModelForCausalLLM, TrainingArguments, Trainer, DataCollatorForLanguageModeling
-from datasets import load_dataset, load_from_disk
+
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    TrainingArguments,
+    Trainer,
+    DataCollatorForLanguageModeling,
+    BitsAndBytesConfig
+)
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from datasets import load_from_disk
 
 def main():
-
-    parser = argparse.ArgumentParser(description="Distributed LlaMa fine tuning")
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser = argparse.ArgumentParser(description="Data Parallel Fine-Tuning with 4-bit + LoRA")
+    parser.add_argument("--batch_size", type=int, default=2, help="Per-device batch size")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Gradient accumulation steps")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--max_length", type=int, default=128)
-    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data")
-    # parser.add_argument("--max-steps", type=int, default=5000)
+    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for DDP (set by torchrun)")
     args = parser.parse_args()
-    
-    # print logs only on the main process
-    is_main_process = args.local_rank in [-1, 0]
 
-    model_dir = "./llama-hf"
-    output_dir = "./checkpoints-llama-data-parallelism"
-    os.makedirs(output_dir, exist_ok=True)
+    # Only rank 0 prints logs
+    is_main_process = (args.local_rank in [-1, 0])
+
     tokenized_data_dir = args.tokenized_data_dir
+    if tokenized_data_dir == "./tokenized_data_test":
+        output_dir = "./checkpoints-llama-data-parallel-test"
+    else:
+        output_dir = "./checkpoints-llama-data-parallel"
+    model_dir = "./llama-hf"
+    os.makedirs(output_dir, exist_ok=True)
 
     if is_main_process:
-        print("Loading tokenizer for data collator...")
+        print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-    
     if is_main_process:
-        print("Loading tokenized datasets...")
-    tokenized_datasets = load_from_disk(tokenized_data_dir)
-
+        print("Loading tokenized datasets from:", args.tokenized_data_dir)
+    tokenized_datasets = load_from_disk(args.tokenized_data_dir)
     train_dataset = tokenized_datasets["train"]
     test_dataset = tokenized_datasets["test"]
 
     if is_main_process:
-        print("Loading model...")
-    model = AutoModelForCausalLLM.from_pretrained(model_dir)
+        print("Loading 4-bit quantized base model (data parallel)...")
+
+    # Configure 4-bit quantization
+    quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,  # or torch.float16 if bf16 not supported
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+    )
+
+    
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir,
+        quantization_config=quant_config,
+        torch_dtype=torch.bfloat16
+    )
 
     if is_main_process:
-        print("Setting up training arguments...")
+        print("Preparing model for k-bit training + enabling gradient checkpointing...")
+    model = prepare_model_for_kbit_training(model)
+    model.gradient_checkpointing_enable()  # lowers activation memory usage
+    model.config.use_cache = False         # disable cache to support gradient checkpointing
+
+    if is_main_process:
+        print("Applying LoRA adapters...")
+    lora_config = LoraConfig(
+        r=4,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=["q_proj", "v_proj"]
+    )
+    model = get_peft_model(model, lora_config)
+
+    if is_main_process:
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Total params: {total_params/1e6:.2f}M, Trainable: {trainable_params/1e6:.2f}M "
+              f"({100*trainable_params/total_params:.4f}%)")
+
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+
+    if is_main_process:
+        print("Setting up TrainingArguments...")
     training_args = TrainingArguments(
         output_dir=output_dir,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        bf16=True,
+        bf16_full_eval=True,
         num_train_epochs=args.epochs,
         evaluation_strategy="epoch",
         logging_strategy="steps",
-        logging_steps=5000,
+        logging_steps=200,
         save_strategy="epoch",
-        # save_steps=500,
-        bf16=True,
-        bf16_full_eval=True,
+        save_total_limit=1,
+        # max_steps=5000,
         optim="paged_adamw_8bit",
-        ddp_find_unused_parameters=False,
+        lr_scheduler_type="cosine",
         learning_rate=5e-4,
         warmup_ratio=0.05,
         weight_decay=0.01,
         group_by_length=True,
         report_to="none",
-        save_total_limit=1
+        ddp_find_unused_parameters=False
     )
 
     if is_main_process:
-        print("Creating trainer...")
+        print("Creating Trainer...")
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -358,31 +522,32 @@ def main():
     )
 
     if is_main_process:
-        print("Starting training...")
+        print("Starting training (data parallel, 4-bit + LoRA + gradient checkpointing)...")
+
     start_time = time.time()
     trainer.train()
     end_time = time.time()
-    time_per_epoch = (end_time - start_time)/training_args.num_train_epochs
-    
-    if is_main_process:
-        print(f"Time per epoch: {time_per_epoch} seconds")
 
-        print("Saving model...")
+    time_per_epoch = (end_time - start_time)/training_args.num_train_epochs
+    if is_main_process:
+        print(f"Time per epoch: {time_per_epoch:.2f} seconds")
+
+        print("Saving final model checkpoint...")
         trainer.save_model(output_dir)
 
-        print("Evaluating model...")
+        print("Evaluating model for perplexity...")
         eval_results = trainer.evaluate()
         eval_loss = eval_results["eval_loss"]
         perplexity = math.exp(eval_loss)
-        print(f"Eval Loss: {eval_loss}, Perplexity: {perplexity}")
-        
-        with open(os.path.join(output_dir, "eval_results_DP.txt"), "w") as f:
-            f.write("***** Distributed Fine Tuning with Data Parallelism Results *****")
-            f.write(f"Time per epoch: {time_per_epoch}\n")
+        print(f"Eval Loss: {eval_loss}, Perplexity: {perplexity:.2f}")
+
+        # Write results
+        with open(os.path.join(output_dir, "eval_results_data_parallel_4bit_lora.txt"), "w") as f:
+            f.write(f"Time per epoch: {time_per_epoch:.2f}\n")
             f.write(f"Eval Loss: {eval_loss}\n")
-            f.write(f"Perplexity: {perplexity}\n")
-        
-        print("Distributed fine-tuning using data parallelism complete!")
+            f.write(f"Perplexity: {perplexity:.2f}\n")
+
+        print("Data parallel (4-bit + LoRA) fine-tuning complete!")
 
 if __name__ == "__main__":
     main()

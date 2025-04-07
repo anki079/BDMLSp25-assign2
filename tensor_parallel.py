@@ -1,255 +1,132 @@
+# tensor_parallel.py
 import os
+import math
+import time
 import torch
 import torch.distributed as dist
-from torch.utils.data import Dataset, DataLoader
-from transformers import LlamaForCausalLM, LlamaTokenizer, LlamaConfig
-import time
-import argparse
-
-class TextDataset(Dataset):
-    def __init__(self, file_path, tokenizer, max_length=512):
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        
-        # Read the text file
-        with open(file_path, 'r', encoding='utf-8') as f:
-            self.lines = [line.strip() for line in f if line.strip()]
-            
-        print(f"Loaded {len(self.lines)} examples from {file_path}")
-    
-    def __len__(self):
-        return len(self.lines)
-    
-    def __getitem__(self, idx):
-        text = self.lines[idx]
-        encodings = self.tokenizer(text, max_length=self.max_length, padding="max_length", 
-                                  truncation=True, return_tensors="pt")
-        
-        # Remove the batch dimension added by the tokenizer
-        item = {key: val.squeeze(0) for key, val in encodings.items()}
-        
-        # Add labels for causal language modeling
-        item['labels'] = item['input_ids'].clone()
-        
-        return item
-
-def setup(rank, num_gpus):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-    
-    # Initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=num_gpus)
-    
-    # Set device
-    torch.cuda.set_device(rank)
-    
-def cleanup():
-    dist.destroy_process_group()
-
-class TensorParallelLinear(torch.nn.Module):
-    def __init__(self, in_features, out_features, rank, num_gpus, bias=True):
-        super().__init__()
-        self.rank = rank
-        self.num_gpus = num_gpus
-        
-        # Split the output dimension
-        self.out_features_per_gpu = out_features // num_gpus
-        if rank == num_gpus - 1:  # Last GPU might have more features
-            self.out_features_per_gpu = out_features - (num_gpus - 1) * self.out_features_per_gpu
-            
-        # Create a local linear layer
-        self.linear = torch.nn.Linear(in_features, self.out_features_per_gpu, bias=bias)
-    
-    def forward(self, x):
-        # Local computation
-        local_output = self.linear(x)
-        
-        # Gather outputs from all GPUs
-        output_list = [torch.zeros_like(local_output) for _ in range(self.num_gpus)]
-        dist.all_gather(output_list, local_output)
-        
-        # Concatenate along the output dimension
-        return torch.cat(output_list, dim=-1)
-
-def apply_tensor_parallelism(model, rank, num_gpus):
-    """Apply tensor parallelism to selected linear layers of the model."""
-    for name, module in model.named_modules():
-        if isinstance(module, torch.nn.Linear) and module.out_features > 1024:
-            # Replace large linear layers with tensor-parallel versions
-            # Get parent module
-            parent_name = name.rsplit('.', 1)[0] if '.' in name else ''
-            child_name = name.rsplit('.', 1)[1] if '.' in name else name
-            
-            parent = model if parent_name == '' else model.get_submodule(parent_name)
-            
-            # Create tensor-parallel layer
-            tp_layer = TensorParallelLinear(
-                module.in_features, 
-                module.out_features,
-                rank,
-                num_gpus,
-                bias=(module.bias is not None)
-            )
-            
-            # Replace layer
-            setattr(parent, child_name, tp_layer)
-            
-            if rank == 0:
-                print(f"Replaced {name} with tensor parallel version")
-    
-    return model
-
-def train(rank, num_gpus, model_path, train_file, test_file, epochs, batch_size):
-    # Setup process group
-    setup(rank, num_gpus)
-    
-    if rank == 0:
-        print(f"Starting tensor parallel training on {num_gpus} GPUs")
-    
-    # Load model and tokenizer
-    try:
-        tokenizer = LlamaTokenizer.from_pretrained(model_path)
-        if rank == 0:
-            print("Tokenizer loaded successfully")
-        
-        config = LlamaConfig.from_pretrained(model_path)
-        if rank == 0:
-            print(f"Model config loaded: {config.hidden_size} hidden size, {config.num_hidden_layers} layers")
-            
-        model = LlamaForCausalLM.from_pretrained(model_path)
-        if rank == 0:
-            print("Model loaded successfully")
-            total_params = sum(p.numel() for p in model.parameters())
-            print(f"Total parameters: {total_params:,}")
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        cleanup()
-        return
-    
-    # Apply tensor parallelism
-    model = apply_tensor_parallelism(model, rank, num_gpus)
-    
-    # Move model to the appropriate device
-    device = torch.device(f"cuda:{rank}")
-    model = model.to(device)
-    
-    # Load datasets
-    try:
-        train_dataset = TextDataset(train_file, tokenizer)
-        test_dataset = TextDataset(test_file, tokenizer)
-    except Exception as e:
-        print(f"Error loading datasets: {e}")
-        cleanup()
-        return
-    
-    # Create dataloader - no need for DistributedSampler as each GPU has the full model
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True,
-        pin_memory=True,
-        num_workers=4
-    )
-    
-    # Setup optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.01)
-    
-    # Training loop
-    total_time = 0
-    for epoch in range(epochs):
-        epoch_start_time = time.time()
-        model.train()
-        total_loss = 0
-        
-        for step, batch in enumerate(train_loader):
-            # Move batch to device
-            batch = {k: v.to(device) for k, v in batch.items()}
-            
-            # Forward pass
-            outputs = model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                labels=batch["labels"]
-            )
-            
-            loss = outputs.loss
-            total_loss += loss.item()
-            
-            # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
-            
-            # Synchronize gradients across GPUs
-            for param in model.parameters():
-                if param.requires_grad:
-                    dist.all_reduce(param.grad.data, op=dist.ReduceOp.SUM)
-                    param.grad.data /= num_gpus
-            
-            optimizer.step()
-            
-            # Print progress
-            if rank == 0 and step % 10 == 0:
-                print(f"Epoch {epoch+1}/{epochs} | Batch {step}/{len(train_loader)} | Loss: {loss.item():.4f}")
-        
-        epoch_end_time = time.time()
-        epoch_time = epoch_end_time - epoch_start_time
-        total_time += epoch_time
-        
-        if rank == 0:  # Only print metrics on the main process
-            avg_loss = total_loss / len(train_loader)
-            print(f"Epoch {epoch+1}/{epochs} complete | Avg Loss: {avg_loss:.4f} | Time: {epoch_time:.2f}s")
-    
-    # Evaluation
-    if rank == 0:
-        model.eval()
-        perplexity = compute_perplexity(model, test_dataset, device)
-        print(f"Perplexity: {perplexity:.2f}")
-        print(f"Average time per epoch: {total_time/epochs:.2f}s")
-    
-    cleanup()
-
-def compute_perplexity(model, dataset, device):
-    test_loader = DataLoader(dataset, batch_size=4)
-    model.eval()
-    total_loss = 0
-    total_length = 0
-    
-    with torch.no_grad():
-        for batch in test_loader:
-            batch = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                labels=batch["labels"]
-            )
-            
-            loss = outputs.loss
-            total_loss += loss.item() * batch["input_ids"].size(0)
-            total_length += batch["input_ids"].size(0)
-    
-    # Compute perplexity
-    avg_loss = total_loss / total_length
-    perplexity = torch.exp(torch.tensor(avg_loss)).item()
-    
-    return perplexity
+from torch.distributed.tensor.parallel import parallelize_module
+from torch.utils.data import DataLoader
+from datasets import load_from_disk
+from transformers import AutoTokenizer, AutoModelForCausalLM, AdamW
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--local_rank", type=int, default=0)
-    parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--batch_size", type=int, default=2)
-    args = parser.parse_args()
+    """
+    Minimal conceptual example of tensor parallel training with PyTorch’s new APIs.
+    This likely requires PyTorch nightly. Actual usage may differ!
+    """
     
-    # Get the number of available GPUs
-    num_gpus = torch.cuda.device_count()
+    ####################################
+    # 1. Initialize Distributed Process
+    ####################################
+    dist.init_process_group(backend="nccl")
+    rank = dist.get_rank()
+    local_rank = int(os.environ["LOCAL_RANK"]) if "LOCAL_RANK" in os.environ else rank
+    world_size = dist.get_world_size()
+
+    # Each process (GPU) uses local_rank as its CUDA device
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+
+    # Only rank 0 will print logs
+    is_main_process = (rank == 0)
+
+    ####################################
+    # 2. Load Tokenizer + Dataset
+    ####################################
+    model_dir = "./llama-hf"
+    tokenized_data_dir = "./tokenized_data"
     
-    # Set file paths relative to the current directory
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(current_dir, "llama-hf")
-    train_file = os.path.join(current_dir, "train.txt")
-    test_file = os.path.join(current_dir, "test.txt")
+    if is_main_process:
+        print("Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    if is_main_process:
+        print("Loading dataset from disk...")
+    tokenized_datasets = load_from_disk(tokenized_data_dir)
+    train_dataset = tokenized_datasets["train"]
+    test_dataset = tokenized_datasets["test"]
     
-    train(args.local_rank, num_gpus, model_path, train_file, test_file, args.epochs, args.batch_size)
+    # Convert datasets to DataLoader
+    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+    test_loader  = DataLoader(test_dataset,  batch_size=8)
+
+    ####################################
+    # 3. Load Model + Parallelize
+    ####################################
+    if is_main_process:
+        print("Loading base LLaMA model...")
+    model = AutoModelForCausalLM.from_pretrained(model_dir)
+    
+    # Move model to local rank
+    model.cuda(device)
+
+    # *Experimental* PyTorch Tensor Parallel API
+    # parallel_mode="column" or "row" are typical for large linear layers
+    parallelize_module(model, parallel_mode="column", devices=[0, 1])
+    
+    # At this point, large layers (e.g. linear layers) are split across GPU 0 and GPU 1.
+    # You should not wrap the model in DistributedDataParallel again — that would combine
+    # data parallel + tensor parallel. If your assignment only wants pure tensor parallel,
+    # do not add a DDP wrapper.
+
+    ####################################
+    # 4. Define Optimizer / Training Loop
+    ####################################
+    optimizer = AdamW(model.parameters(), lr=5e-4)
+    epochs = 1
+
+    if is_main_process:
+        print("Starting tensor-parallel training...")
+
+    for epoch in range(epochs):
+        model.train()
+        start_time = time.time()
+
+        # Basic training loop (no HF Trainer)
+        for step, batch in enumerate(train_loader):
+            # batch has "input_ids", "attention_mask", etc.
+            # Move to device
+            input_ids = batch["input_ids"].to(device)
+            labels = input_ids.clone()
+            
+            outputs = model(input_ids, labels=labels)
+            loss = outputs.loss
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            if is_main_process and step % 100 == 0:
+                print(f"Epoch {epoch}, step {step}, loss = {loss.item()}")
+
+        end_time = time.time()
+        if is_main_process:
+            print(f"Epoch {epoch} finished. Time for epoch = {end_time - start_time:.2f} seconds")
+
+    # Evaluate perplexity on test set
+    if is_main_process:
+        print("Evaluating model perplexity...")
+    model.eval()
+    total_loss, total_steps = 0.0, 0
+    with torch.no_grad():
+        for batch in test_loader:
+            input_ids = batch["input_ids"].to(device)
+            labels = input_ids.clone()
+            outputs = model(input_ids, labels=labels)
+            total_loss += outputs.loss.item()
+            total_steps += 1
+
+    avg_loss = total_loss / total_steps
+    perplexity = math.exp(avg_loss)
+
+    if is_main_process:
+        print(f"Test Loss = {avg_loss:.4f}, Perplexity = {perplexity:.2f}")
+
+    dist.destroy_process_group()
+    if is_main_process:
+        print("Tensor parallel training complete!")
 
 if __name__ == "__main__":
     main()
