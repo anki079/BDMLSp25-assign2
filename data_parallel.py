@@ -441,6 +441,9 @@ def main():
     train_dataset = tokenized_datasets["train"]
     test_dataset = tokenized_datasets["test"]
 
+    local_rank_env = int(os.environ.get("LOCAL_RANK", 0))
+    device_map = {"": local_rank_env}
+    
     if is_main_process:
         print("Loading 4-bit quantized base model (data parallel)...")
 
@@ -456,14 +459,15 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
         quantization_config=quant_config,
-        torch_dtype=torch.bfloat16
+        torch_dtype=torch.bfloat16,
+        device_map=device_map
     )
 
     if is_main_process:
         print("Preparing model for k-bit training + enabling gradient checkpointing...")
     model = prepare_model_for_kbit_training(model)
-    model.gradient_checkpointing_enable()  # lowers activation memory usage
-    model.config.use_cache = False         # disable cache to support gradient checkpointing
+    model.gradient_checkpointing_enable()
+    model.config.use_cache = False
 
     if is_main_process:
         print("Applying LoRA adapters...")
