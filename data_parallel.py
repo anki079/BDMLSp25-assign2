@@ -25,8 +25,8 @@ from datasets import load_from_disk
 
 def main():
     parser = argparse.ArgumentParser(description="Data Parallel Fine-Tuning")
-    parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data")
@@ -125,7 +125,7 @@ def main():
         logging_steps=1000,
         save_strategy="epoch",
         save_total_limit=1,
-        # max_steps=5000,
+        max_steps=5000,
         optim="paged_adamw_8bit",
         lr_scheduler_type="cosine",
         learning_rate=5e-4,
