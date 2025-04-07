@@ -1,4 +1,10 @@
-# data_parallel.py
+'''
+* Data parallel distributed LlaMa-3.2-3B fine-tuning on climate data
+* Approach leverages HuggingFace's Trainer class to handle distributed data parallelism automatically 
+    when launched with torchrun or torch.distributed.launch
+* Memory optimizations used: 4-bit + LoRA + gradient checkpointing
+'''
+
 import os
 import math
 import torch
@@ -18,17 +24,24 @@ from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_from_disk
 
 def main():
-    parser = argparse.ArgumentParser(description="Data Parallel Fine-Tuning with 4-bit + LoRA")
-    parser.add_argument("--batch_size", type=int, default=2, help="Per-device batch size")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Gradient accumulation steps")
+    parser = argparse.ArgumentParser(description="Data Parallel Fine-Tuning")
+    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data")
-    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for DDP (set by torchrun)")
+    parser.add_argument("--local_rank", type=int, default=-1, help="local rank for DDP (set by torchrun)")
     args = parser.parse_args()
 
-    # Only rank 0 prints logs
-    is_main_process = (args.local_rank in [-1, 0])
+    local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
+
+    is_distributed = "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1
+
+    print(f"[RANK {local_rank}] Running in {'distributed' if is_distributed else 'standalone'} mode")   
+
+    print(f"PROCESS INFO: RANK={local_rank}, PID={os.getpid()}")
+
+    is_main_process = (local_rank in [-1, 0])
 
     tokenized_data_dir = args.tokenized_data_dir
     if tokenized_data_dir == "./tokenized_data_test":
@@ -36,34 +49,33 @@ def main():
     else:
         output_dir = "./checkpoints-llama-data-parallel"
     model_dir = "./llama-hf"
-    os.makedirs(output_dir, exist_ok=True)
-
+    
     if is_main_process:
-        print("Loading tokenizer...")
+        os.makedirs(output_dir, exist_ok=True)
+
+    print(f"[RANK {local_rank}] Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    if is_main_process:
-        print("Loading tokenized datasets from:", args.tokenized_data_dir)
+    print(f"[RANK {local_rank}] Loading tokenized datasets from:", args.tokenized_data_dir)
     tokenized_datasets = load_from_disk(args.tokenized_data_dir)
     train_dataset = tokenized_datasets["train"]
     test_dataset = tokenized_datasets["test"]
 
-    local_rank_env = int(os.environ.get("LOCAL_RANK", 0))
-    device_map = {"": local_rank_env}
+    device_map = {"": local_rank}
+    print(f"[RANK {local_rank}] Using device: {device_map}")
     
-    if is_main_process:
-        print("Loading 4-bit quantized base model (data parallel)...")
+    print(f"[RANK {local_rank}] Loading 4-bit quantization config...")
 
-    # 4-bit quantization
     quant_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_compute_dtype=torch.bfloat16,
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="nf4",
     )
-
+    
+    print(f"[RANK {local_rank}] Loading model...")
     
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
@@ -72,14 +84,14 @@ def main():
         device_map=device_map
     )
 
-    if is_main_process:
-        print("Preparing model for k-bit training + enabling gradient checkpointing...")
+    print(f"[RANK {local_rank}] Model loaded to device {device_map}")
+
+    print(f"[RANK {local_rank}] Preparing model for k-bit training + enabling gradient checkpointing...")
     model = prepare_model_for_kbit_training(model)
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
 
-    if is_main_process:
-        print("Applying LoRA adapters...")
+    print(f"[RANK {local_rank}] Applying LoRA adapters...")
     lora_config = LoraConfig(
         r=4,
         lora_alpha=16,
@@ -96,10 +108,10 @@ def main():
         print(f"Total params: {total_params/1e6:.2f}M, Trainable: {trainable_params/1e6:.2f}M "
               f"({100*trainable_params/total_params:.4f}%)")
 
+    print(f"[RANK {local_rank}] Creating data collator...")
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-    if is_main_process:
-        print("Setting up TrainingArguments...")
+    print(f"[RANK {local_rank}] Setting up TrainingArguments...")
     training_args = TrainingArguments(
         output_dir=output_dir,
         per_device_train_batch_size=args.batch_size,
@@ -110,7 +122,7 @@ def main():
         num_train_epochs=args.epochs,
         evaluation_strategy="epoch",
         logging_strategy="steps",
-        logging_steps=200,
+        logging_steps=1000,
         save_strategy="epoch",
         save_total_limit=1,
         # max_steps=5000,
@@ -124,8 +136,8 @@ def main():
         ddp_find_unused_parameters=False
     )
 
-    if is_main_process:
-        print("Creating Trainer...")
+
+    print(f"[RANK {local_rank}] Creating Trainer...")
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -134,8 +146,7 @@ def main():
         data_collator=data_collator
     )
 
-    if is_main_process:
-        print("Starting training (data parallel, 4-bit + LoRA + gradient checkpointing)...")
+    print(f"[RANK {local_rank}] Starting training (data parallel)...")
 
     start_time = time.time()
     trainer.train()
@@ -159,7 +170,7 @@ def main():
             f.write(f"Eval Loss: {eval_loss}\n")
             f.write(f"Perplexity: {perplexity:.2f}\n")
 
-        print("Data parallel (4-bit + LoRA) fine-tuning complete!")
+        print("Data parallel fine-tuning complete!")
 
 if __name__ == "__main__":
     main()
