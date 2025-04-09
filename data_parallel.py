@@ -1,8 +1,8 @@
 '''
-* Data parallel distributed LlaMa-3.2-3B fine-tuning on climate data
-* Approach leverages HuggingFace's Trainer class to handle distributed data parallelism automatically 
+- Data parallel distributed LlaMa-3.2-3B fine-tuning on climate data
+- Approach leverages HuggingFace's Trainer class to handle distributed data parallelism automatically 
     when launched with torchrun or torch.distributed.launch
-* Memory optimizations used: 4-bit + LoRA + gradient checkpointing
+- Memory optimizations used: 4-bit + LoRA + gradient checkpointing
 '''
 
 import os
