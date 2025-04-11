@@ -6,7 +6,6 @@ from itertools import islice
 
 def main():
     parser = argparse.ArgumentParser(description="Pretokenize dataset for LLM training")
-    parser.add_argument("--max_length", type=int, default=None)
     parser.add_argument("--chunk_size", type=int, default=1000,
                         help="num of tokens per chunk")
     # parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
