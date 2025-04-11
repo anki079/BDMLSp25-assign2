@@ -91,13 +91,7 @@ def main():
         },
         
         "mp_size": 2,
-        "optimizer": {
-        "type": "Adam",
-        "params": {
-            "lr": 0.0002,
-            "adam_w_mode": True
-        }
-    },
+        
         "fp16": {
             "enabled": False
         },
