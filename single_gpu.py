@@ -1,7 +1,6 @@
 '''
-- Data parallel distributed LlaMa-3.2-3B fine-tuning on climate data
-- Approach leverages HuggingFace's Trainer class to handle distributed data parallelism automatically 
-    when launched with torchrun or torch.distributed.launch
+- Single GPU LlaMa-3.2-3B fine-tuning on climate data
+- Baseline for assignment 2
 - Memory optimizations used: gradient checkpointing, bf16
 '''
 
@@ -17,25 +16,22 @@ from transformers import (
     AutoModelForCausalLM,
     TrainingArguments,
     Trainer,
-    DataCollatorForLanguageModeling,
-    # BitsAndBytesConfig
+    DataCollatorForLanguageModeling
 )
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_from_disk
 
 def main():
-    parser = argparse.ArgumentParser(description="Data Parallel Fine-Tuning")
+    parser = argparse.ArgumentParser(description="Single GPU Fine-Tuning")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
-    parser.add_argument("--local_rank", type=int, default=-1, help="local rank for DDP (set by torchrun)")
     args = parser.parse_args()
 
-    local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
+    local_rank = -1
 
-    is_distributed = "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1
+    is_distributed = False
 
     print(f"[RANK {local_rank}] Running in {'distributed' if is_distributed else 'standalone'} mode")   
 
@@ -44,10 +40,7 @@ def main():
     is_main_process = (local_rank in [-1, 0])
 
     tokenized_data_dir = args.tokenized_data_dir
-    if tokenized_data_dir == "./tokenized_data_test":
-        output_dir = "./checkpoints-llama-data-parallel-test"
-    else:
-        output_dir = "./checkpoints-llama-data-parallel-2"
+    output_dir = "./checkpoints-llama-single-gpu"
     model_dir = "./llama-hf"
     
     if is_main_process:
@@ -63,23 +56,13 @@ def main():
     train_dataset = tokenized_datasets["train"]
     test_dataset = tokenized_datasets["test"]
 
-    device_map = {"": local_rank}
+    device_map = {"": 0}
     print(f"[RANK {local_rank}] Using device: {device_map}")
-    
-    # print(f"[RANK {local_rank}] Loading 4-bit quantization config...")
-
-    # quant_config = BitsAndBytesConfig(
-    #     load_in_4bit=True,
-    #     bnb_4bit_compute_dtype=torch.bfloat16,
-    #     bnb_4bit_use_double_quant=True,
-    #     bnb_4bit_quant_type="nf4",
-    # )
     
     print(f"[RANK {local_rank}] Loading model...")
     
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
-        # quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
         device_map=device_map
     )
@@ -87,20 +70,8 @@ def main():
     print(f"[RANK {local_rank}] Model loaded to device {device_map}")
 
     print(f"[RANK {local_rank}] Enabling gradient checkpointing...")
-    # model = prepare_model_for_kbit_training(model)
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
-
-    # print(f"[RANK {local_rank}] Applying LoRA adapters...")
-    # lora_config = LoraConfig(
-    #     r=4,
-    #     lora_alpha=16,
-    #     lora_dropout=0.05,
-    #     bias="none",
-    #     task_type="CAUSAL_LM",
-    #     target_modules=["q_proj", "v_proj"]
-    # )
-    # model = get_peft_model(model, lora_config)
 
     if is_main_process:
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -132,8 +103,7 @@ def main():
         warmup_ratio=0.05,
         weight_decay=0.01,
         group_by_length=True,
-        report_to="none",
-        ddp_find_unused_parameters=False
+        report_to="none"
     )
 
 
@@ -146,7 +116,7 @@ def main():
         data_collator=data_collator
     )
 
-    print(f"[RANK {local_rank}] Starting training (data parallel)...")
+    print(f"[RANK {local_rank}] Starting training (single GPU with bf16 and grad checkpointing)...")
 
     start_time = time.time()
     trainer.train()
@@ -159,19 +129,18 @@ def main():
         print("Saving final model checkpoint...")
         trainer.save_model(output_dir)
 
-    print("Evaluating model for perplexity...")
-    eval_results = trainer.evaluate()
-    eval_loss = eval_results["eval_loss"]
-    perplexity = math.exp(eval_loss)
-    if is_main_process:
+        print("Evaluating model for perplexity...")
+        eval_results = trainer.evaluate()
+        eval_loss = eval_results["eval_loss"]
+        perplexity = math.exp(eval_loss)
         print(f"Eval Loss: {eval_loss}, Perplexity: {perplexity:.2f}")
 
-        with open(os.path.join(output_dir, "eval_results_data_parallel.txt"), "w") as f:
+        with open(os.path.join(output_dir, "eval_results_single_gpu.txt"), "w") as f:
             f.write(f"Time per epoch: {time_per_epoch:.2f}\n")
             f.write(f"Eval Loss: {eval_loss}\n")
             f.write(f"Perplexity: {perplexity:.2f}\n")
 
-    print("Data parallel fine-tuning complete!")
+        print("Fine-tuning complete!")
 
 if __name__ == "__main__":
     main()
