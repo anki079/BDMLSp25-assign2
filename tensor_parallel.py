@@ -13,7 +13,7 @@ import bitsandbytes as bnb
 from torch.distributed.tensor.parallel import parallelize_module
 from torch.utils.data import DataLoader
 from datasets import load_from_disk
-from transformers import AutoTokenizer, AutoModelForCausalLM, AdamW
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import get_cosine_schedule_with_warmup # lr for scheduler
 
 def main():
@@ -54,8 +54,8 @@ def main():
     test_loader  = DataLoader(test_dataset,  batch_size=args.batch_size)
 
     num_train_examples = len(train_dataset)
-    num_train_examples = len(test_dataset)
-    print(f"Num Train Examples = {num_train_examples}, Num Test Examples = {len(test_dataset)}")
+    num_test_examples = len(test_dataset)
+    print(f"Num Train Examples = {num_train_examples}, Num Test Examples = {num_test_examples}")
     
     print("Loading base LLaMA model...")
     model = AutoModelForCausalLM.from_pretrained(model_dir)
@@ -70,7 +70,7 @@ def main():
 
     # tensor parallelism
     print("Applying tensor parallel across GPUs [0,1] (parallel_mode='column')...")
-    parallelize_module(model, parallel_mode="column", devices=[0, 1])
+    parallelize_module(model, "column", devices=[0, 1])
 
     # optimizer + lr scheduler setup
     optimizer = bnb.optim.PagedAdamW(
