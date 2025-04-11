@@ -62,7 +62,7 @@ def main():
             if "attention_mask" in examples:
                 all_attn_masks.extend(examples["attention_mask"][i])
 
-        # now chunk them in steps of chunk_size
+        # chunk in steps of chunk_size
         total_length = len(all_input_ids)
         result = {
             "input_ids": [],
