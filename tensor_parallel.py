@@ -86,7 +86,7 @@ def main():
         "gradient_accumulation_steps": 1, 
 
         "bf16": {
-            "enabled": true
+            "enabled": True
         },
 
         "zero_optimization": {
@@ -105,10 +105,10 @@ def main():
         },
 
         "fp16": {
-            "enabled": false
+            "enabled": False
         },
 
-        "wall_clock_breakdown": false
+        "wall_clock_breakdown": False
         }
 
     if is_main_process:
