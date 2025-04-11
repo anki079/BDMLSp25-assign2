@@ -105,7 +105,7 @@ def main():
             "enabled": True,
             "pipeline_parallel_size": 2,
             "schedule": "1F1B",
-            "chunks": 2 #test with 4 later
+            "chunks": 4
         },
         "fp16": {
             "enabled": False
