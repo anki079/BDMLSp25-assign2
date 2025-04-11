@@ -25,7 +25,7 @@ from datasets import load_from_disk
 
 def main():
     parser = argparse.ArgumentParser(description="Data Parallel Fine-Tuning")
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=3)
     # parser.add_argument("--max_length", type=int, default=128)
