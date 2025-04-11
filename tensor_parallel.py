@@ -121,7 +121,7 @@ def main():
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     # HF TrainingArguments
-    print(f"[RANK {local_rank}] Setting up TrainingArguments with DeepSpeed = {args.deepspeed}")
+    print(f"[RANK {local_rank}] Setting up TrainingArguments with DeepSpeed")
     training_args = TrainingArguments(
         output_dir=output_dir,
         per_device_train_batch_size=args.batch_size,
@@ -143,7 +143,7 @@ def main():
         group_by_length=True,
         report_to="none",
         ddp_find_unused_parameters=False,
-        deepspeed=args.deepspeed
+        deepspeed=ds_config
     )
 
     print(f"[RANK {local_rank}] Creating Trainer...")
