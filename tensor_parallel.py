@@ -34,7 +34,7 @@ def main():
     # 2. Load Tokenizer + Dataset
     ####################################
     model_dir = "./llama-hf"
-    tokenized_data_dir = "./tokenized_data"
+    tokenized_data_dir = "./tokenized_data_chunks"
     
     if is_main_process:
         print("Loading tokenizer...")
