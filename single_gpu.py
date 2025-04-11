@@ -25,7 +25,7 @@ from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 def main():
     parser = argparse.ArgumentParser(description="Single GPU Fine-Tuning")
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=3)
     # parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
