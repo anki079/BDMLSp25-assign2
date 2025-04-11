@@ -29,7 +29,7 @@ def main():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--max_length", type=int, default=128)
-    parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data")
+    parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
     parser.add_argument("--local_rank", type=int, default=-1, help="local rank for DDP (set by torchrun)")
     args = parser.parse_args()
 
@@ -47,7 +47,7 @@ def main():
     if tokenized_data_dir == "./tokenized_data_test":
         output_dir = "./checkpoints-llama-data-parallel-test"
     else:
-        output_dir = "./checkpoints-llama-data-parallel"
+        output_dir = "./checkpoints-llama-data-parallel-2"
     model_dir = "./llama-hf"
     
     if is_main_process:
@@ -91,16 +91,16 @@ def main():
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
 
-    print(f"[RANK {local_rank}] Applying LoRA adapters...")
-    lora_config = LoraConfig(
-        r=4,
-        lora_alpha=16,
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=["q_proj", "v_proj"]
-    )
-    model = get_peft_model(model, lora_config)
+    # print(f"[RANK {local_rank}] Applying LoRA adapters...")
+    # lora_config = LoraConfig(
+    #     r=4,
+    #     lora_alpha=16,
+    #     lora_dropout=0.05,
+    #     bias="none",
+    #     task_type="CAUSAL_LM",
+    #     target_modules=["q_proj", "v_proj"]
+    # )
+    # model = get_peft_model(model, lora_config)
 
     if is_main_process:
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -125,10 +125,10 @@ def main():
         logging_steps=1000,
         save_strategy="epoch",
         save_total_limit=1,
-        max_steps=5000,
+        # max_steps=5000,
         optim="paged_adamw_8bit",
         lr_scheduler_type="cosine",
-        learning_rate=5e-4,
+        learning_rate=2e-4,
         warmup_ratio=0.05,
         weight_decay=0.01,
         group_by_length=True,
