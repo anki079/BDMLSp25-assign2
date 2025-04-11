@@ -1,11 +1,8 @@
-#!/usr/bin/env python
-
 """
-- Tensor Parallel (DeepSpeed) LLaMA fine-tuning on climate data
-- Memory optimizations used: gradient checkpointing, bf16
-- We rely on the same chunked dataset and hyperparams as the data parallel code
-- We pass `--deepspeed ds_config.json` to the HF Trainer arguments,
-  with "tensor_parallel.tp_size" = 2 to enable model parallel.
+- Tensor Parallel LLaMA fine-tuning on climate data
+- Approach uses DeepSpeed to implement tensor parallelism
+- Memory optimizations used: lora, 4bit, gradient checkpointing, bf16
+- Using the same chunked dataset and hyperparams as the data parallel code
 """
 
 import os
@@ -26,23 +23,18 @@ from transformers import (
 from datasets import load_from_disk
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
-# If you want LoRA or kbit, you can import from peft here:
-# from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-
 def main():
     parser = argparse.ArgumentParser(description="DeepSpeed Tensor Parallel Fine-Tuning")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--max_length", type=int, default=128)
+    # parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for DDP/deepspeed")
-    # We add a deepspeed arg for convenience, though HF also reads from sys.argv
     # parser.add_argument("--deepspeed", type=str, default="ds_config.json",
     #                     help="Path to DeepSpeed config JSON.")
     args = parser.parse_args()
 
-    # Print rank info
     local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     is_distributed = (world_size > 1)
@@ -52,7 +44,6 @@ def main():
 
     is_main_process = (local_rank in [-1, 0])
 
-    # Output directory
     if args.tokenized_data_dir == "./tokenized_data_test":
         output_dir = "./checkpoints-llama-tensor-parallel-test"
     else:
@@ -137,7 +128,6 @@ def main():
     print(f"[RANK {local_rank}] Creating data collator...")
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-    # HF TrainingArguments
     print(f"[RANK {local_rank}] Setting up TrainingArguments with DeepSpeed")
     training_args = TrainingArguments(
         output_dir=output_dir,

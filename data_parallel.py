@@ -2,7 +2,7 @@
 - Data parallel distributed LlaMa-3.2-3B fine-tuning on climate data
 - Approach leverages HuggingFace's Trainer class to handle distributed data parallelism automatically 
     when launched with torchrun or torch.distributed.launch
-- Memory optimizations used: gradient checkpointing, bf16
+- Memory optimizations used: gradient checkpointing, bf16, 4bit, lora
 '''
 
 import os
@@ -18,7 +18,7 @@ from transformers import (
     TrainingArguments,
     Trainer,
     DataCollatorForLanguageModeling,
-    # BitsAndBytesConfig
+    BitsAndBytesConfig
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_from_disk
@@ -28,7 +28,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--max_length", type=int, default=128)
+    # parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
     parser.add_argument("--local_rank", type=int, default=-1, help="local rank for DDP (set by torchrun)")
     args = parser.parse_args()
@@ -47,7 +47,7 @@ def main():
     if tokenized_data_dir == "./tokenized_data_test":
         output_dir = "./checkpoints-llama-data-parallel-test"
     else:
-        output_dir = "./checkpoints-llama-data-parallel-2"
+        output_dir = "./checkpoints-llama-data-parallel-mem-opt"
     model_dir = "./llama-hf"
     
     if is_main_process:
@@ -66,20 +66,20 @@ def main():
     device_map = {"": local_rank}
     print(f"[RANK {local_rank}] Using device: {device_map}")
     
-    # print(f"[RANK {local_rank}] Loading 4-bit quantization config...")
+    print(f"[RANK {local_rank}] Loading 4-bit quantization config...")
 
-    # quant_config = BitsAndBytesConfig(
-    #     load_in_4bit=True,
-    #     bnb_4bit_compute_dtype=torch.bfloat16,
-    #     bnb_4bit_use_double_quant=True,
-    #     bnb_4bit_quant_type="nf4",
-    # )
+    quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+    )
     
     print(f"[RANK {local_rank}] Loading model...")
     
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
-        # quantization_config=quant_config,
+        quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
         device_map=device_map
     )
@@ -87,20 +87,20 @@ def main():
     print(f"[RANK {local_rank}] Model loaded to device {device_map}")
 
     print(f"[RANK {local_rank}] Enabling gradient checkpointing...")
-    # model = prepare_model_for_kbit_training(model)
+    model = prepare_model_for_kbit_training(model)
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
 
-    # print(f"[RANK {local_rank}] Applying LoRA adapters...")
-    # lora_config = LoraConfig(
-    #     r=4,
-    #     lora_alpha=16,
-    #     lora_dropout=0.05,
-    #     bias="none",
-    #     task_type="CAUSAL_LM",
-    #     target_modules=["q_proj", "v_proj"]
-    # )
-    # model = get_peft_model(model, lora_config)
+    print(f"[RANK {local_rank}] Applying LoRA adapters...")
+    lora_config = LoraConfig(
+        r=4,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=["q_proj", "v_proj"]
+    )
+    model = get_peft_model(model, lora_config)
 
     if is_main_process:
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
