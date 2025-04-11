@@ -89,9 +89,15 @@ def main():
         "zero_optimization": {
             "stage": 0
         },
+        "activation_checkpointing": {
+            "partition_activations": True,
+            "cpu_checkpointing": True,
+            "contiguous_memory_optimization": True,
+            "number_checkpoints": 2
+        },
         
         "mp_size": 2,
-        
+
         "fp16": {
             "enabled": False
         },
