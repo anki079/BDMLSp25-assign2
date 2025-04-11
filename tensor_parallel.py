@@ -82,34 +82,26 @@ def main():
 
     ds_config = {
         "train_batch_size": "auto", 
-
         "gradient_accumulation_steps": "auto", 
-
         "bf16": {
             "enabled": True
         },
-
         "zero_optimization": {
             "stage": 0
         },
         
-        "tensor_parallel": {
-            "tp_size": 2
-        },
-
+        "mp_size": 2,
         "optimizer": {
             "type": "AdamW",
             "params": {
-            "lr": 0.0002
+                "lr": 0.0002
             }
         },
-
         "fp16": {
             "enabled": False
         },
-
         "wall_clock_breakdown": False
-        }
+    }
 
     if is_main_process:
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
