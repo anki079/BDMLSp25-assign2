@@ -86,7 +86,7 @@ def main():
 
     print(f"[RANK {local_rank}] Model loaded to device {device_map}")
 
-    print(f"[RANK {local_rank}] Enabling gradient checkpointing...")
+    print(f"[RANK {local_rank}] Preparing model for kbit + enabling gradient checkpointing...")
     model = prepare_model_for_kbit_training(model)
     model.gradient_checkpointing_enable()
     model.config.use_cache = False

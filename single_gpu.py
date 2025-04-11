@@ -1,7 +1,7 @@
 '''
 - Single GPU LlaMa-3.2-3B fine-tuning on climate data
 - Baseline for assignment 2
-- Memory optimizations used: gradient checkpointing, bf16
+- Memory optimizations used: gradient checkpointing, bf16, 4bit, lora
 '''
 
 import os
@@ -16,16 +16,18 @@ from transformers import (
     AutoModelForCausalLM,
     TrainingArguments,
     Trainer,
-    DataCollatorForLanguageModeling
+    DataCollatorForLanguageModeling,
+    BitsAndBytesConfig
 )
 from datasets import load_from_disk
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 def main():
     parser = argparse.ArgumentParser(description="Single GPU Fine-Tuning")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--max_length", type=int, default=128)
+    # parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
     args = parser.parse_args()
 
@@ -40,7 +42,7 @@ def main():
     is_main_process = (local_rank in [-1, 0])
 
     tokenized_data_dir = args.tokenized_data_dir
-    output_dir = "./checkpoints-llama-single-gpu"
+    output_dir = "./checkpoints-llama-single-gpu-mem-opt"
     model_dir = "./llama-hf"
     
     if is_main_process:
@@ -58,20 +60,42 @@ def main():
 
     device_map = {"": 0}
     print(f"[RANK {local_rank}] Using device: {device_map}")
+
+    print(f"[RANK {local_rank}] Loading 4-bit quantization config...")
+
+    quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+    )
     
     print(f"[RANK {local_rank}] Loading model...")
     
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
+        quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
         device_map=device_map
     )
 
     print(f"[RANK {local_rank}] Model loaded to device {device_map}")
 
-    print(f"[RANK {local_rank}] Enabling gradient checkpointing...")
+    print(f"[RANK {local_rank}] Preparing model for kbit + enabling gradient checkpointing...")
+    model = prepare_model_for_kbit_training(model)
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
+
+    print(f"[RANK {local_rank}] Applying LoRA adapters...")
+    lora_config = LoraConfig(
+        r=4,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=["q_proj", "v_proj"]
+    )
+    model = get_peft_model(model, lora_config)
 
     if is_main_process:
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -116,7 +140,7 @@ def main():
         data_collator=data_collator
     )
 
-    print(f"[RANK {local_rank}] Starting training (single GPU with bf16 and grad checkpointing)...")
+    print(f"[RANK {local_rank}] Starting training (single GPU with 4bit, lora, bf16 + grad checkpointing)...")
 
     start_time = time.time()
     trainer.train()
@@ -129,10 +153,11 @@ def main():
         print("Saving final model checkpoint...")
         trainer.save_model(output_dir)
 
-        print("Evaluating model for perplexity...")
-        eval_results = trainer.evaluate()
-        eval_loss = eval_results["eval_loss"]
-        perplexity = math.exp(eval_loss)
+    print("Evaluating model for perplexity...")
+    eval_results = trainer.evaluate()
+    eval_loss = eval_results["eval_loss"]
+    perplexity = math.exp(eval_loss)
+    if is_main_process:
         print(f"Eval Loss: {eval_loss}, Perplexity: {perplexity:.2f}")
 
         with open(os.path.join(output_dir, "eval_results_single_gpu.txt"), "w") as f:
