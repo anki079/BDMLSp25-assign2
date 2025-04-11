@@ -20,9 +20,12 @@ from transformers import (
     AutoModelForCausalLM,
     TrainingArguments,
     Trainer,
-    DataCollatorForLanguageModeling
+    DataCollatorForLanguageModeling,
+    BitsAndBytesConfig
 )
 from datasets import load_from_disk
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+
 # If you want LoRA or kbit, you can import from peft here:
 # from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
@@ -70,15 +73,36 @@ def main():
 
     print(f"[RANK {local_rank}] Train size = {len(train_dataset)}, Test size = {len(test_dataset)}")
 
+    print(f"[RANK {local_rank}] Loading 4-bit quantization config...")
+
+    quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+    )
+
     print(f"[RANK {local_rank}] Loading model from {model_dir} ...")
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
-        torch_dtype=torch.bfloat16  # match bf16
+        torch_dtype=torch.bfloat16,
+        quantization_config=quant_config,
     )
 
     print(f"[RANK {local_rank}] Enabling gradient checkpointing...")
+    model = prepare_model_for_kbit_training(model)
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
+
+    lora_config = LoraConfig(
+        r=4,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=["q_proj", "v_proj"]
+    )
+    model = get_peft_model(model, lora_config)
 
     ds_config = {
         "train_batch_size": "auto", 
