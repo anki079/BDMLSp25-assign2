@@ -150,7 +150,6 @@ def main():
     trainer = Trainer(
         model=model,
         args=training_args,
-        config=ds_config,
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         data_collator=data_collator
