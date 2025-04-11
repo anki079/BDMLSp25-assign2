@@ -35,8 +35,8 @@ def main():
     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for DDP/deepspeed")
     # We add a deepspeed arg for convenience, though HF also reads from sys.argv
-    parser.add_argument("--deepspeed", type=str, default="ds_config.json",
-                        help="Path to DeepSpeed config JSON.")
+    # parser.add_argument("--deepspeed", type=str, default="ds_config.json",
+    #                     help="Path to DeepSpeed config JSON.")
     args = parser.parse_args()
 
     # Print rank info
@@ -80,6 +80,37 @@ def main():
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
 
+    ds_config = {
+        "train_batch_size": 64, 
+
+        "gradient_accumulation_steps": 1, 
+
+        "bf16": {
+            "enabled": true
+        },
+
+        "zero_optimization": {
+            "stage": 0
+        },
+        
+        "tensor_parallel": {
+            "tp_size": 2
+        },
+
+        "optimizer": {
+            "type": "AdamW",
+            "params": {
+            "lr": 0.0002
+            }
+        },
+
+        "fp16": {
+            "enabled": false
+        },
+
+        "wall_clock_breakdown": false
+        }
+
     if is_main_process:
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total_params = sum(p.numel() for p in model.parameters())
@@ -119,6 +150,7 @@ def main():
     trainer = Trainer(
         model=model,
         args=training_args,
+        config=ds_config,
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         data_collator=data_collator
