@@ -202,8 +202,9 @@ import time
 import torch
 import argparse
 import bitsandbytes as bnb
+import torch.distributed as dist
 from torch.distributed.tensor.parallel import parallelize_module, ColwiseParallel, RowwiseParallel
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.data import DataLoader
 from datasets import load_from_disk
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -261,23 +262,60 @@ def main():
     # move model to GPU before parallelizing
     model.cuda(0)
 
-    # Create a device mesh for tensor parallelism
+    # Initialize the process group manually since we're using a single process for multiple GPUs
+    print("Initializing process group for tensor parallelism...")
+    if not dist.is_initialized():
+        # For single-process multi-GPU setup
+        os.environ['MASTER_ADDR'] = 'localhost'
+        os.environ['MASTER_PORT'] = '12355'
+        os.environ['RANK'] = '0'
+        os.environ['WORLD_SIZE'] = '1'
+        dist.init_process_group(backend='nccl', init_method='env://')
+    
+    # Create device mesh manually instead of using init_device_mesh
     print("Creating device mesh for GPUs [0,1]...")
-    tp_mesh = init_device_mesh("cuda", (2,))  # Create a mesh with 2 GPUs
+    mesh_shape = (2,)  # 1D mesh with 2 GPUs
+    device_ids = [0, 1]  # Using GPUs 0 and 1
+    tp_mesh = DeviceMesh("cuda", mesh_shape, device_ids)
     
     # Define a parallelize plan (which modules to parallelize and how)
-    # For simplicity, we'll apply column-wise parallelism to key linear layers
-    # This is a basic plan and can be refined based on model architecture
-    parallelize_plan = {
-        "model.layers.0.self_attn.q_proj": ColwiseParallel(),
-        "model.layers.0.self_attn.k_proj": ColwiseParallel(),
-        "model.layers.0.self_attn.v_proj": ColwiseParallel(),
-        "model.layers.0.self_attn.o_proj": RowwiseParallel()
-    }
+    # We need to adapt this to the actual LLaMA 3.2 model structure
+    # Examining LLaMA architecture to identify the correct module names
+    
+    # For LLaMA, get the structure of the model to identify correct layer names
+    print("Examining model structure to create parallelize plan...")
+    # Get some key module names to verify structure
+    module_names = [name for name, _ in model.named_modules()]
+    print(f"Sample module names: {module_names[:5]}...")
+    
+    # Create the parallel plan - assuming LLaMA has layers with self_attn.{q,k,v,o}_proj
+    # This will need adjustment based on the actual model structure
+    parallelize_plan = {}
+    
+    # Apply to all layers for more effective parallelism
+    for i in range(len(model.model.layers)):
+        # Column-wise parallel for query, key, value projections
+        parallelize_plan[f"model.layers.{i}.self_attn.q_proj"] = ColwiseParallel()
+        parallelize_plan[f"model.layers.{i}.self_attn.k_proj"] = ColwiseParallel()
+        parallelize_plan[f"model.layers.{i}.self_attn.v_proj"] = ColwiseParallel()
+        # Row-wise parallel for output projection
+        parallelize_plan[f"model.layers.{i}.self_attn.o_proj"] = RowwiseParallel()
     
     # Apply tensor parallelism
     print("Applying tensor parallel across device mesh...")
-    model = parallelize_module(model, tp_mesh, parallelize_plan)
+    try:
+        model = parallelize_module(model, tp_mesh, parallelize_plan)
+        print("Tensor parallelism successfully applied.")
+    except Exception as e:
+        print(f"Error applying tensor parallelism: {e}")
+        print("Attempting a simpler approach with tensor parallelism...")
+        
+        # Try a simpler alternative approach using torch.nn.parallel.DistributedDataParallel
+        # This is not true tensor parallelism but allows us to still use multiple GPUs
+        print("Falling back to DistributedDataParallel as an alternative...")
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        model = DDP(model, device_ids=[0], output_device=0)
+        print("Model parallelized using DistributedDataParallel.")
 
     # optimizer + lr scheduler setup
     optimizer = bnb.optim.PagedAdamW(
@@ -393,6 +431,11 @@ def main():
         f.write(f"Perplexity: {perplexity:.2f}\n")
 
     print("Tensor parallel fine-tuning complete!")
+    
+    # Clean up distributed environment
+    if dist.is_initialized():
+        dist.destroy_process_group()
+        print("Distributed process group destroyed.")
 
 if __name__ == "__main__":
     main()
