@@ -25,8 +25,8 @@ from datasets import load_from_disk
 
 def main():
     parser = argparse.ArgumentParser(description="Data Parallel Fine-Tuning")
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=8) # effective batch size = 64 for DP with 4 x 8 x 2 GPUs
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4) # effective batch size = 64 for DP with 8 x 4 x 2 GPUs
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
     parser.add_argument("--local_rank", type=int, default=-1, help="local rank for DDP (set by torchrun)")
