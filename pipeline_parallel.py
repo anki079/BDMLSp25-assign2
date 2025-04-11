@@ -24,10 +24,9 @@ from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 def main():
     parser = argparse.ArgumentParser(description="Pipeline Parallel Fine-Tuning with HuggingFace + DeepSpeed")
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8) # effective batch size = 64 for PP with 8 x 8
     parser.add_argument("--epochs", type=int, default=3)
-    # parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
     parser.add_argument("--local_rank", type=int, default=-1)
     args = parser.parse_args()
