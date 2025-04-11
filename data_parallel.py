@@ -2,7 +2,7 @@
 - Data parallel distributed LlaMa-3.2-3B fine-tuning on climate data
 - Approach leverages HuggingFace's Trainer class to handle distributed data parallelism automatically 
     when launched with torchrun or torch.distributed.launch
-- Memory optimizations used: 4-bit + LoRA + gradient checkpointing
+- Memory optimizations used: gradient checkpointing, bf16
 '''
 
 import os
@@ -27,7 +27,7 @@ def main():
     parser = argparse.ArgumentParser(description="Data Parallel Fine-Tuning")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
     parser.add_argument("--local_rank", type=int, default=-1, help="local rank for DDP (set by torchrun)")
@@ -86,7 +86,7 @@ def main():
 
     print(f"[RANK {local_rank}] Model loaded to device {device_map}")
 
-    print(f"[RANK {local_rank}] Preparing model for k-bit training + enabling gradient checkpointing...")
+    print(f"[RANK {local_rank}] Enabling gradient checkpointing...")
     # model = prepare_model_for_kbit_training(model)
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
@@ -122,7 +122,7 @@ def main():
         num_train_epochs=args.epochs,
         evaluation_strategy="epoch",
         logging_strategy="steps",
-        logging_steps=1000,
+        logging_steps=100,
         save_strategy="epoch",
         save_total_limit=1,
         # max_steps=5000,

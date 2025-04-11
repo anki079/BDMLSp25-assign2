@@ -1,132 +1,191 @@
-# tensor_parallel.py
+'''
+- Tensor parallel distributed LlaMa-3.2-3B fine-tuning on climate data
+- 
+- Memory optimizations used: Gradient checkpointing, bf16
+'''
+
 import os
 import math
 import time
 import torch
-import torch.distributed as dist
+import argparse
+import bitsandbytes as bnb
 from torch.distributed.tensor.parallel import parallelize_module
 from torch.utils.data import DataLoader
 from datasets import load_from_disk
 from transformers import AutoTokenizer, AutoModelForCausalLM, AdamW
+from transformers import get_cosine_schedule_with_warmup # lr for scheduler
 
 def main():
-    """
-    Minimal conceptual example of tensor parallel training with PyTorch’s new APIs.
-    This likely requires PyTorch nightly. Actual usage may differ!
-    """
+    parser = argparse.ArgumentParser(description="Tensor Parallel Fine-Tuning (matching data parallel hyperparams)")
+    parser.add_argument("--batch_size", type=int, default=8, help="Per-device train batch size")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--warmup_ratio", type=float, default=0.05)
+    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--logging_steps", type=int, default=100)
+    args = parser.parse_args()
+
+    # single process 2 gpus
+    print("*** Tensor Parallel Fine-Tuning ***")
+    print(f"Process Info: PID={os.getpid()} - single process controlling GPUs [0,1].")
     
-    ####################################
-    # 1. Initialize Distributed Process
-    ####################################
-    dist.init_process_group(backend="nccl")
-    rank = dist.get_rank()
-    local_rank = int(os.environ["LOCAL_RANK"]) if "LOCAL_RANK" in os.environ else rank
-    world_size = dist.get_world_size()
+    output_dir = "./checkpoints-llama-tensor-parallel"
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Checkpoints + results will be saved to: {output_dir}")
 
-    # Each process (GPU) uses local_rank as its CUDA device
-    device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
-
-    # Only rank 0 will print logs
-    is_main_process = (rank == 0)
-
-    ####################################
-    # 2. Load Tokenizer + Dataset
-    ####################################
     model_dir = "./llama-hf"
-    tokenized_data_dir = "./tokenized_data_chunks"
     
-    if is_main_process:
-        print("Loading tokenizer...")
+    print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    if is_main_process:
-        print("Loading dataset from disk...")
+    tokenized_data_dir = "./tokenized_data_chunks"
+    print(f"Loading tokenized datasets from: {tokenized_data_dir}")
     tokenized_datasets = load_from_disk(tokenized_data_dir)
     train_dataset = tokenized_datasets["train"]
     test_dataset = tokenized_datasets["test"]
     
-    # Convert datasets to DataLoader
-    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
-    test_loader  = DataLoader(test_dataset,  batch_size=8)
+    #convert to dataloader
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    test_loader  = DataLoader(test_dataset,  batch_size=args.batch_size)
 
-    ####################################
-    # 3. Load Model + Parallelize
-    ####################################
-    if is_main_process:
-        print("Loading base LLaMA model...")
+    num_train_examples = len(train_dataset)
+    num_train_examples = len(test_dataset)
+    print(f"Num Train Examples = {num_train_examples}, Num Test Examples = {len(test_dataset)}")
+    
+    print("Loading base LLaMA model...")
     model = AutoModelForCausalLM.from_pretrained(model_dir)
     
-    # Move model to local rank
-    model.cuda(device)
+    print("Converting model to bf16 + enabling gradient checkpointing...")
+    model = model.to(torch.bfloat16)
+    model.gradient_checkpointing_enable()
+    model.config.use_cache = False
 
-    # *Experimental* PyTorch Tensor Parallel API
-    # parallel_mode="column" or "row" are typical for large linear layers
+    # move model to GPU before parallelizing
+    model.cuda(0)
+
+    # tensor parallelism
+    print("Applying tensor parallel across GPUs [0,1] (parallel_mode='column')...")
     parallelize_module(model, parallel_mode="column", devices=[0, 1])
+
+    # optimizer + lr scheduler setup
+    optimizer = bnb.optim.PagedAdamW(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay
+    )
     
-    # At this point, large layers (e.g. linear layers) are split across GPU 0 and GPU 1.
-    # You should not wrap the model in DistributedDataParallel again — that would combine
-    # data parallel + tensor parallel. If your assignment only wants pure tensor parallel,
-    # do not add a DDP wrapper.
+    # replicating "cosine" schedule
+    # total_steps = total training steps = (num_batches_per_epoch * epochs)
+    # num_batches_per_epoch = len(train_loader) = (num_train_examples / batch_size)
+    # using gradient_accumulation effectively each "accum" cycle is 1 step in HF
+    steps_per_epoch = math.ceil(num_train_examples / (args.batch_size * 1.0))  # ignoring shuffle, approximate
+    effective_steps_per_epoch = steps_per_epoch / args.gradient_accumulation_steps
+    total_steps = int(effective_steps_per_epoch * args.epochs)
 
-    ####################################
-    # 4. Define Optimizer / Training Loop
-    ####################################
-    optimizer = AdamW(model.parameters(), lr=5e-4)
-    epochs = 1
+    warmup_steps = int(total_steps * args.warmup_ratio)
+    print(f"Using Cosine LR scheduler: total_steps={total_steps}, warmup_steps={warmup_steps}")
 
-    if is_main_process:
-        print("Starting tensor-parallel training...")
+    lr_scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps
+    )
 
-    for epoch in range(epochs):
+    # trainign loop
+    print(f"Starting training for {args.epochs} epoch(s) with gradient_accumulation={args.gradient_accumulation_steps} ...")
+    total_train_start = time.time()
+
+    global_step = 0
+    for epoch in range(args.epochs):
         model.train()
-        start_time = time.time()
+        epoch_start = time.time()
 
-        # Basic training loop (no HF Trainer)
+        total_loss = 0.0
+        total_steps_in_epoch = 0
+        accum_counter = 0
+
         for step, batch in enumerate(train_loader):
-            # batch has "input_ids", "attention_mask", etc.
-            # Move to device
-            input_ids = batch["input_ids"].to(device)
+            # move batch to GPU0 
+            input_ids = batch["input_ids"].cuda(0)
             labels = input_ids.clone()
-            
+
             outputs = model(input_ids, labels=labels)
-            loss = outputs.loss
-            
-            optimizer.zero_grad()
+            loss = outputs.loss / args.gradient_accumulation_steps  # scale by grad_accum for correct accumulation
             loss.backward()
-            optimizer.step()
-            
-            if is_main_process and step % 100 == 0:
-                print(f"Epoch {epoch}, step {step}, loss = {loss.item()}")
 
-        end_time = time.time()
-        if is_main_process:
-            print(f"Epoch {epoch} finished. Time for epoch = {end_time - start_time:.2f} seconds")
+            accum_counter += 1
+            total_loss += loss.item()
+            if accum_counter == args.gradient_accumulation_steps:
+                # update
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
 
-    # Evaluate perplexity on test set
-    if is_main_process:
-        print("Evaluating model perplexity...")
+                global_step += 1
+                total_steps_in_epoch += 1
+                accum_counter = 0
+
+                # logging
+                if (global_step % args.logging_steps) == 0:
+                    avg_loss = (total_loss * args.gradient_accumulation_steps) / (total_steps_in_epoch) 
+                    # "total_loss" was scaled so multiply back
+                    print(f"Epoch={epoch}, global_step={global_step}, avg_loss={avg_loss:.4f}")
+
+        epoch_end = time.time()
+        epoch_time = epoch_end - epoch_start
+
+        # recompute average loss for final epoch stats
+        avg_epoch_loss = 0.0
+        if total_steps_in_epoch > 0:
+            avg_epoch_loss = (total_loss * args.gradient_accumulation_steps) / total_steps_in_epoch
+
+        print(f"Epoch {epoch} complete. Time per epoch={epoch_time:.2f}s, avg_loss={avg_epoch_loss:.4f}")
+
+        # save checkpoint after each epoch
+        epoch_ckpt_dir = os.path.join(output_dir, f"epoch-{epoch}")
+        os.makedirs(epoch_ckpt_dir, exist_ok=True)
+        print(f"Saving model checkpoint after epoch {epoch} to {epoch_ckpt_dir}...")
+        model.save_pretrained(epoch_ckpt_dir)
+
+    total_train_end = time.time()
+    total_train_time = total_train_end - total_train_start
+    time_per_epoch = total_train_time / args.epochs
+    print(f"Total training time={total_train_time:.2f}s => ~{time_per_epoch:.2f}s per epoch")
+
+    # eval
+    print("Evaluating model on test set for perplexity...")
     model.eval()
-    total_loss, total_steps = 0.0, 0
+    total_loss_eval = 0.0
+    total_eval_steps = 0
+
     with torch.no_grad():
         for batch in test_loader:
-            input_ids = batch["input_ids"].to(device)
+            input_ids = batch["input_ids"].cuda(0)
             labels = input_ids.clone()
+
             outputs = model(input_ids, labels=labels)
-            total_loss += outputs.loss.item()
-            total_steps += 1
+            total_loss_eval += outputs.loss.item()
+            total_eval_steps += 1
 
-    avg_loss = total_loss / total_steps
-    perplexity = math.exp(avg_loss)
+    avg_eval_loss = total_loss_eval / total_eval_steps if total_eval_steps > 0 else float("inf")
+    perplexity = math.exp(avg_eval_loss) if avg_eval_loss < 20 else float("inf")
 
-    if is_main_process:
-        print(f"Test Loss = {avg_loss:.4f}, Perplexity = {perplexity:.2f}")
+    print(f"Eval Loss: {avg_eval_loss:.4f}, Perplexity: {perplexity:.2f}")
 
-    dist.destroy_process_group()
-    if is_main_process:
-        print("Tensor parallel training complete!")
+    # write results file
+    results_path = os.path.join(output_dir, "eval_results_tensor_parallel.txt")
+    print(f"Writing results to {results_path}")
+    with open(results_path, "w") as f:
+        f.write(f"Time per epoch: {time_per_epoch:.2f}\n")
+        f.write(f"Eval Loss: {avg_eval_loss:.4f}\n")
+        f.write(f"Perplexity: {perplexity:.2f}\n")
+
+    print("Tensor parallel fine-tuning complete!")
 
 if __name__ == "__main__":
     main()
