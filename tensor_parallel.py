@@ -81,9 +81,9 @@ def main():
     model.config.use_cache = False
 
     ds_config = {
-        "train_batch_size": 64, 
+        "train_batch_size": 8, 
 
-        "gradient_accumulation_steps": 1, 
+        "gradient_accumulation_steps": 8, 
 
         "bf16": {
             "enabled": True
