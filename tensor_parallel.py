@@ -1,200 +1,12 @@
-# '''
-# - Tensor parallel distributed LlaMa-3.2-3B fine-tuning on climate data
-# - 
-# - Memory optimizations used: Gradient checkpointing, bf16
-# '''
+#!/usr/bin/env python
 
-# import os
-# import math
-# import time
-# import torch
-# import argparse
-# import bitsandbytes as bnb
-# from torch.distributed.tensor.parallel import parallelize_module
-# from torch.utils.data import DataLoader
-# from datasets import load_from_disk
-# from transformers import AutoTokenizer, AutoModelForCausalLM
-# from transformers import get_cosine_schedule_with_warmup # lr for scheduler
-
-# def main():
-#     parser = argparse.ArgumentParser(description="Tensor Parallel Fine-Tuning (matching data parallel hyperparams)")
-#     parser.add_argument("--batch_size", type=int, default=8, help="Per-device train batch size")
-#     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
-#     parser.add_argument("--epochs", type=int, default=3)
-#     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
-#     parser.add_argument("--lr", type=float, default=2e-4)
-#     parser.add_argument("--warmup_ratio", type=float, default=0.05)
-#     parser.add_argument("--weight_decay", type=float, default=0.01)
-#     parser.add_argument("--logging_steps", type=int, default=100)
-#     args = parser.parse_args()
-
-#     # single process 2 gpus
-#     print("*** Tensor Parallel Fine-Tuning ***")
-#     print(f"Process Info: PID={os.getpid()} - single process controlling GPUs [0,1].")
-    
-#     output_dir = "./checkpoints-llama-tensor-parallel"
-#     os.makedirs(output_dir, exist_ok=True)
-#     print(f"Checkpoints + results will be saved to: {output_dir}")
-
-#     model_dir = "./llama-hf"
-    
-#     print("Loading tokenizer...")
-#     tokenizer = AutoTokenizer.from_pretrained(model_dir)
-#     if tokenizer.pad_token is None:
-#         tokenizer.pad_token = tokenizer.eos_token
-
-#     tokenized_data_dir = "./tokenized_data_chunks"
-#     print(f"Loading tokenized datasets from: {tokenized_data_dir}")
-#     tokenized_datasets = load_from_disk(tokenized_data_dir)
-#     train_dataset = tokenized_datasets["train"]
-#     test_dataset = tokenized_datasets["test"]
-    
-#     #convert to dataloader
-#     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-#     test_loader  = DataLoader(test_dataset,  batch_size=args.batch_size)
-
-#     num_train_examples = len(train_dataset)
-#     num_test_examples = len(test_dataset)
-#     print(f"Num Train Examples = {num_train_examples}, Num Test Examples = {num_test_examples}")
-    
-#     print("Loading base LLaMA model...")
-#     model = AutoModelForCausalLM.from_pretrained(model_dir)
-    
-#     print("Converting model to bf16 + enabling gradient checkpointing...")
-#     model = model.to(torch.bfloat16)
-#     model.gradient_checkpointing_enable()
-#     model.config.use_cache = False
-
-#     # move model to GPU before parallelizing
-#     model.cuda(0)
-
-#     # tensor parallelism
-#     print("Applying tensor parallel across GPUs [0,1] (parallel_mode='column')...")
-#     parallelize_module(model, "column", devices=[0, 1])
-
-#     # optimizer + lr scheduler setup
-#     optimizer = bnb.optim.PagedAdamW(
-#         model.parameters(),
-#         lr=args.lr,
-#         weight_decay=args.weight_decay
-#     )
-    
-#     # replicating "cosine" schedule
-#     # total_steps = total training steps = (num_batches_per_epoch * epochs)
-#     # num_batches_per_epoch = len(train_loader) = (num_train_examples / batch_size)
-#     # using gradient_accumulation effectively each "accum" cycle is 1 step in HF
-#     steps_per_epoch = math.ceil(num_train_examples / (args.batch_size * 1.0))  # ignoring shuffle, approximate
-#     effective_steps_per_epoch = steps_per_epoch / args.gradient_accumulation_steps
-#     total_steps = int(effective_steps_per_epoch * args.epochs)
-
-#     warmup_steps = int(total_steps * args.warmup_ratio)
-#     print(f"Using Cosine LR scheduler: total_steps={total_steps}, warmup_steps={warmup_steps}")
-
-#     lr_scheduler = get_cosine_schedule_with_warmup(
-#         optimizer,
-#         num_warmup_steps=warmup_steps,
-#         num_training_steps=total_steps
-#     )
-
-#     # trainign loop
-#     print(f"Starting training for {args.epochs} epoch(s) with gradient_accumulation={args.gradient_accumulation_steps} ...")
-#     total_train_start = time.time()
-
-#     global_step = 0
-#     for epoch in range(args.epochs):
-#         model.train()
-#         epoch_start = time.time()
-
-#         total_loss = 0.0
-#         total_steps_in_epoch = 0
-#         accum_counter = 0
-
-#         for step, batch in enumerate(train_loader):
-#             # move batch to GPU0 
-#             input_ids = batch["input_ids"].cuda(0)
-#             labels = input_ids.clone()
-
-#             outputs = model(input_ids, labels=labels)
-#             loss = outputs.loss / args.gradient_accumulation_steps  # scale by grad_accum for correct accumulation
-#             loss.backward()
-
-#             accum_counter += 1
-#             total_loss += loss.item()
-#             if accum_counter == args.gradient_accumulation_steps:
-#                 # update
-#                 optimizer.step()
-#                 lr_scheduler.step()
-#                 optimizer.zero_grad()
-
-#                 global_step += 1
-#                 total_steps_in_epoch += 1
-#                 accum_counter = 0
-
-#                 # logging
-#                 if (global_step % args.logging_steps) == 0:
-#                     avg_loss = (total_loss * args.gradient_accumulation_steps) / (total_steps_in_epoch) 
-#                     # "total_loss" was scaled so multiply back
-#                     print(f"Epoch={epoch}, global_step={global_step}, avg_loss={avg_loss:.4f}")
-
-#         epoch_end = time.time()
-#         epoch_time = epoch_end - epoch_start
-
-#         # recompute average loss for final epoch stats
-#         avg_epoch_loss = 0.0
-#         if total_steps_in_epoch > 0:
-#             avg_epoch_loss = (total_loss * args.gradient_accumulation_steps) / total_steps_in_epoch
-
-#         print(f"Epoch {epoch} complete. Time per epoch={epoch_time:.2f}s, avg_loss={avg_epoch_loss:.4f}")
-
-#         # save checkpoint after each epoch
-#         epoch_ckpt_dir = os.path.join(output_dir, f"epoch-{epoch}")
-#         os.makedirs(epoch_ckpt_dir, exist_ok=True)
-#         print(f"Saving model checkpoint after epoch {epoch} to {epoch_ckpt_dir}...")
-#         model.save_pretrained(epoch_ckpt_dir)
-
-#     total_train_end = time.time()
-#     total_train_time = total_train_end - total_train_start
-#     time_per_epoch = total_train_time / args.epochs
-#     print(f"Total training time={total_train_time:.2f}s => ~{time_per_epoch:.2f}s per epoch")
-
-#     # eval
-#     print("Evaluating model on test set for perplexity...")
-#     model.eval()
-#     total_loss_eval = 0.0
-#     total_eval_steps = 0
-
-#     with torch.no_grad():
-#         for batch in test_loader:
-#             input_ids = batch["input_ids"].cuda(0)
-#             labels = input_ids.clone()
-
-#             outputs = model(input_ids, labels=labels)
-#             total_loss_eval += outputs.loss.item()
-#             total_eval_steps += 1
-
-#     avg_eval_loss = total_loss_eval / total_eval_steps if total_eval_steps > 0 else float("inf")
-#     perplexity = math.exp(avg_eval_loss) if avg_eval_loss < 20 else float("inf")
-
-#     print(f"Eval Loss: {avg_eval_loss:.4f}, Perplexity: {perplexity:.2f}")
-
-#     # write results file
-#     results_path = os.path.join(output_dir, "eval_results_tensor_parallel.txt")
-#     print(f"Writing results to {results_path}")
-#     with open(results_path, "w") as f:
-#         f.write(f"Time per epoch: {time_per_epoch:.2f}\n")
-#         f.write(f"Eval Loss: {avg_eval_loss:.4f}\n")
-#         f.write(f"Perplexity: {perplexity:.2f}\n")
-
-#     print("Tensor parallel fine-tuning complete!")
-
-# if __name__ == "__main__":
-#     main()
-
-'''
-- Tensor parallel distributed LlaMa-3.2-3B fine-tuning on climate data
-- 
-- Memory optimizations used: Gradient checkpointing, bf16
-'''
+"""
+- Tensor Parallel (DeepSpeed) LLaMA fine-tuning on climate data
+- Memory optimizations used: gradient checkpointing, bf16
+- We rely on the same chunked dataset and hyperparams as the data parallel code
+- We pass `--deepspeed ds_config.json` to the HF Trainer arguments,
+  with "tensor_parallel.tp_size" = 2 to enable model parallel.
+"""
 
 import os
 import math
@@ -202,240 +14,140 @@ import time
 import torch
 import argparse
 import bitsandbytes as bnb
-import torch.distributed as dist
-from torch.distributed.tensor.parallel import parallelize_module, ColwiseParallel, RowwiseParallel
-from torch.distributed.device_mesh import DeviceMesh
-from torch.utils.data import DataLoader
+
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    TrainingArguments,
+    Trainer,
+    DataCollatorForLanguageModeling
+)
 from datasets import load_from_disk
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from transformers import get_cosine_schedule_with_warmup # lr for scheduler
+# If you want LoRA or kbit, you can import from peft here:
+# from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 def main():
-    parser = argparse.ArgumentParser(description="Tensor Parallel Fine-Tuning (matching data parallel hyperparams)")
-    parser.add_argument("--batch_size", type=int, default=8, help="Per-device train batch size")
+    parser = argparse.ArgumentParser(description="DeepSpeed Tensor Parallel Fine-Tuning")
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--max_length", type=int, default=128)
     parser.add_argument("--tokenized_data_dir", type=str, default="./tokenized_data_chunks")
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--warmup_ratio", type=float, default=0.05)
-    parser.add_argument("--weight_decay", type=float, default=0.01)
-    parser.add_argument("--logging_steps", type=int, default=100)
+    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for DDP/deepspeed")
+    # We add a deepspeed arg for convenience, though HF also reads from sys.argv
+    parser.add_argument("--deepspeed", type=str, default="ds_config.json",
+                        help="Path to DeepSpeed config JSON.")
     args = parser.parse_args()
 
-    # single process 2 gpus
-    print("*** Tensor Parallel Fine-Tuning ***")
-    print(f"Process Info: PID={os.getpid()} - single process controlling GPUs [0,1].")
-    
-    output_dir = "./checkpoints-llama-tensor-parallel"
-    os.makedirs(output_dir, exist_ok=True)
-    print(f"Checkpoints + results will be saved to: {output_dir}")
+    # Print rank info
+    local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    is_distributed = (world_size > 1)
+
+    print(f"[RANK {local_rank}] Running in {'distributed' if is_distributed else 'standalone'} mode")
+    print(f"PROCESS INFO: RANK={local_rank}, PID={os.getpid()}")
+
+    is_main_process = (local_rank in [-1, 0])
+
+    # Output directory
+    if args.tokenized_data_dir == "./tokenized_data_test":
+        output_dir = "./checkpoints-llama-tensor-parallel-test"
+    else:
+        output_dir = "./checkpoints-llama-tensor-parallel-ds"
+    if is_main_process:
+        os.makedirs(output_dir, exist_ok=True)
 
     model_dir = "./llama-hf"
-    
-    print("Loading tokenizer...")
+    print(f"[RANK {local_rank}] Loading tokenizer from {model_dir} ...")
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    tokenized_data_dir = "./tokenized_data_chunks"
-    print(f"Loading tokenized datasets from: {tokenized_data_dir}")
-    tokenized_datasets = load_from_disk(tokenized_data_dir)
+    print(f"[RANK {local_rank}] Loading tokenized dataset from: {args.tokenized_data_dir}")
+    tokenized_datasets = load_from_disk(args.tokenized_data_dir)
     train_dataset = tokenized_datasets["train"]
     test_dataset = tokenized_datasets["test"]
-    
-    #convert to dataloader
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    test_loader  = DataLoader(test_dataset,  batch_size=args.batch_size)
 
-    num_train_examples = len(train_dataset)
-    num_test_examples = len(test_dataset)
-    print(f"Num Train Examples = {num_train_examples}, Num Test Examples = {num_test_examples}")
-    
-    print("Loading base LLaMA model...")
-    model = AutoModelForCausalLM.from_pretrained(model_dir)
-    
-    print("Converting model to bf16 + enabling gradient checkpointing...")
-    model = model.to(torch.bfloat16)
+    print(f"[RANK {local_rank}] Train size = {len(train_dataset)}, Test size = {len(test_dataset)}")
+
+    print(f"[RANK {local_rank}] Loading model from {model_dir} ...")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir,
+        torch_dtype=torch.bfloat16  # match bf16
+    )
+
+    print(f"[RANK {local_rank}] Enabling gradient checkpointing...")
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
 
-    # move model to GPU before parallelizing
-    model.cuda(0)
+    if is_main_process:
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Total params: {total_params/1e6:.2f}M, Trainable: {trainable_params/1e6:.2f}M "
+              f"({100*trainable_params/total_params:.4f}%)")
 
-    # Initialize the process group manually since we're using a single process for multiple GPUs
-    print("Initializing process group for tensor parallelism...")
-    if not dist.is_initialized():
-        # For single-process multi-GPU setup
-        os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = '12355'
-        os.environ['RANK'] = '0'
-        os.environ['WORLD_SIZE'] = '1'
-        dist.init_process_group(backend='nccl', init_method='env://')
-    
-    # Create device mesh manually instead of using init_device_mesh
-    print("Creating device mesh for GPUs [0,1]...")
-    mesh_shape = (2,)  # 1D mesh with 2 GPUs
-    device_ids = [0, 1]  # Using GPUs 0 and 1
-    tp_mesh = DeviceMesh("cuda", mesh_shape, device_ids)
-    
-    # Define a parallelize plan (which modules to parallelize and how)
-    # We need to adapt this to the actual LLaMA 3.2 model structure
-    # Examining LLaMA architecture to identify the correct module names
-    
-    # For LLaMA, get the structure of the model to identify correct layer names
-    print("Examining model structure to create parallelize plan...")
-    # Get some key module names to verify structure
-    module_names = [name for name, _ in model.named_modules()]
-    print(f"Sample module names: {module_names[:5]}...")
-    
-    # Create the parallel plan - assuming LLaMA has layers with self_attn.{q,k,v,o}_proj
-    # This will need adjustment based on the actual model structure
-    parallelize_plan = {}
-    
-    # Apply to all layers for more effective parallelism
-    for i in range(len(model.model.layers)):
-        # Column-wise parallel for query, key, value projections
-        parallelize_plan[f"model.layers.{i}.self_attn.q_proj"] = ColwiseParallel()
-        parallelize_plan[f"model.layers.{i}.self_attn.k_proj"] = ColwiseParallel()
-        parallelize_plan[f"model.layers.{i}.self_attn.v_proj"] = ColwiseParallel()
-        # Row-wise parallel for output projection
-        parallelize_plan[f"model.layers.{i}.self_attn.o_proj"] = RowwiseParallel()
-    
-    # Apply tensor parallelism
-    print("Applying tensor parallel across device mesh...")
-    try:
-        model = parallelize_module(model, tp_mesh, parallelize_plan)
-        print("Tensor parallelism successfully applied.")
-    except Exception as e:
-        print(f"Error applying tensor parallelism: {e}")
-        print("Attempting a simpler approach with tensor parallelism...")
-        
-        # Try a simpler alternative approach using torch.nn.parallel.DistributedDataParallel
-        # This is not true tensor parallelism but allows us to still use multiple GPUs
-        print("Falling back to DistributedDataParallel as an alternative...")
-        from torch.nn.parallel import DistributedDataParallel as DDP
-        model = DDP(model, device_ids=[0], output_device=0)
-        print("Model parallelized using DistributedDataParallel.")
+    print(f"[RANK {local_rank}] Creating data collator...")
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-    # optimizer + lr scheduler setup
-    optimizer = bnb.optim.PagedAdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay
-    )
-    
-    # replicating "cosine" schedule
-    # total_steps = total training steps = (num_batches_per_epoch * epochs)
-    # num_batches_per_epoch = len(train_loader) = (num_train_examples / batch_size)
-    # using gradient_accumulation effectively each "accum" cycle is 1 step in HF
-    steps_per_epoch = math.ceil(num_train_examples / (args.batch_size * 1.0))  # ignoring shuffle, approximate
-    effective_steps_per_epoch = steps_per_epoch / args.gradient_accumulation_steps
-    total_steps = int(effective_steps_per_epoch * args.epochs)
-
-    warmup_steps = int(total_steps * args.warmup_ratio)
-    print(f"Using Cosine LR scheduler: total_steps={total_steps}, warmup_steps={warmup_steps}")
-
-    lr_scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps
+    # HF TrainingArguments
+    print(f"[RANK {local_rank}] Setting up TrainingArguments with DeepSpeed = {args.deepspeed}")
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        bf16=True,
+        bf16_full_eval=True,
+        num_train_epochs=args.epochs,
+        evaluation_strategy="epoch",
+        logging_strategy="steps",
+        logging_steps=100,
+        save_strategy="epoch",
+        save_total_limit=1,
+        optim="paged_adamw_8bit",
+        lr_scheduler_type="cosine",
+        learning_rate=2e-4,
+        warmup_ratio=0.05,
+        weight_decay=0.01,
+        group_by_length=True,
+        report_to="none",
+        ddp_find_unused_parameters=False,
+        deepspeed=args.deepspeed
     )
 
-    # training loop
-    print(f"Starting training for {args.epochs} epoch(s) with gradient_accumulation={args.gradient_accumulation_steps} ...")
-    total_train_start = time.time()
+    print(f"[RANK {local_rank}] Creating Trainer...")
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=test_dataset,
+        data_collator=data_collator
+    )
 
-    global_step = 0
-    for epoch in range(args.epochs):
-        model.train()
-        epoch_start = time.time()
+    print(f"[RANK {local_rank}] Starting training (Deepspeed tensor parallel)...")
+    start_time = time.time()
+    trainer.train()
+    end_time = time.time()
 
-        total_loss = 0.0
-        total_steps_in_epoch = 0
-        accum_counter = 0
+    time_per_epoch = (end_time - start_time)/training_args.num_train_epochs
+    if is_main_process:
+        print(f"Time per epoch: {time_per_epoch:.2f} seconds")
+        print("Saving final model checkpoint...")
+        trainer.save_model(output_dir)
 
-        for step, batch in enumerate(train_loader):
-            # move batch to GPU0 
-            input_ids = batch["input_ids"].cuda(0)
-            labels = input_ids.clone()
+    print("Evaluating model for perplexity...")
+    eval_results = trainer.evaluate()
+    eval_loss = eval_results["eval_loss"]
+    perplexity = math.exp(eval_loss)
+    if is_main_process:
+        print(f"Eval Loss: {eval_loss}, Perplexity: {perplexity:.2f}")
 
-            outputs = model(input_ids, labels=labels)
-            loss = outputs.loss / args.gradient_accumulation_steps  # scale by grad_accum for correct accumulation
-            loss.backward()
-
-            accum_counter += 1
-            total_loss += loss.item()
-            if accum_counter == args.gradient_accumulation_steps:
-                # update
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-
-                global_step += 1
-                total_steps_in_epoch += 1
-                accum_counter = 0
-
-                # logging
-                if (global_step % args.logging_steps) == 0:
-                    avg_loss = (total_loss * args.gradient_accumulation_steps) / (total_steps_in_epoch) 
-                    # "total_loss" was scaled so multiply back
-                    print(f"Epoch={epoch}, global_step={global_step}, avg_loss={avg_loss:.4f}")
-
-        epoch_end = time.time()
-        epoch_time = epoch_end - epoch_start
-
-        # recompute average loss for final epoch stats
-        avg_epoch_loss = 0.0
-        if total_steps_in_epoch > 0:
-            avg_epoch_loss = (total_loss * args.gradient_accumulation_steps) / total_steps_in_epoch
-
-        print(f"Epoch {epoch} complete. Time per epoch={epoch_time:.2f}s, avg_loss={avg_epoch_loss:.4f}")
-
-        # save checkpoint after each epoch
-        epoch_ckpt_dir = os.path.join(output_dir, f"epoch-{epoch}")
-        os.makedirs(epoch_ckpt_dir, exist_ok=True)
-        print(f"Saving model checkpoint after epoch {epoch} to {epoch_ckpt_dir}...")
-        model.save_pretrained(epoch_ckpt_dir)
-
-    total_train_end = time.time()
-    total_train_time = total_train_end - total_train_start
-    time_per_epoch = total_train_time / args.epochs
-    print(f"Total training time={total_train_time:.2f}s => ~{time_per_epoch:.2f}s per epoch")
-
-    # eval
-    print("Evaluating model on test set for perplexity...")
-    model.eval()
-    total_loss_eval = 0.0
-    total_eval_steps = 0
-
-    with torch.no_grad():
-        for batch in test_loader:
-            input_ids = batch["input_ids"].cuda(0)
-            labels = input_ids.clone()
-
-            outputs = model(input_ids, labels=labels)
-            total_loss_eval += outputs.loss.item()
-            total_eval_steps += 1
-
-    avg_eval_loss = total_loss_eval / total_eval_steps if total_eval_steps > 0 else float("inf")
-    perplexity = math.exp(avg_eval_loss) if avg_eval_loss < 20 else float("inf")
-
-    print(f"Eval Loss: {avg_eval_loss:.4f}, Perplexity: {perplexity:.2f}")
-
-    # write results file
-    results_path = os.path.join(output_dir, "eval_results_tensor_parallel.txt")
-    print(f"Writing results to {results_path}")
-    with open(results_path, "w") as f:
-        f.write(f"Time per epoch: {time_per_epoch:.2f}\n")
-        f.write(f"Eval Loss: {avg_eval_loss:.4f}\n")
-        f.write(f"Perplexity: {perplexity:.2f}\n")
+        with open(os.path.join(output_dir, "eval_results_tensor_parallel.txt"), "w") as f:
+            f.write(f"Time per epoch: {time_per_epoch:.2f}\n")
+            f.write(f"Eval Loss: {eval_loss}\n")
+            f.write(f"Perplexity: {perplexity:.2f}\n")
 
     print("Tensor parallel fine-tuning complete!")
-    
-    # Clean up distributed environment
-    if dist.is_initialized():
-        dist.destroy_process_group()
-        print("Distributed process group destroyed.")
 
 if __name__ == "__main__":
     main()
