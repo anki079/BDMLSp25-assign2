@@ -1,3 +1,10 @@
+"""
+- Pipeline Parallel LLaMA fine-tuning on climate data
+- Approach uses DeepSpeed to implement pipeline parallelism
+- Memory optimizations used: lora, 4bit, gradient checkpointing, bf16
+- Using the same chunked dataset and hyperparams as the data parallel code
+"""
+
 import os
 import math
 import time
