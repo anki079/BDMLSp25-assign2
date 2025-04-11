@@ -38,17 +38,6 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
-    # def tokenize_function(examples):
-    #     outputs = tokenizer(
-    #         examples["text"], 
-    #         truncation=True, 
-    #         padding="max_length", 
-    #         max_length=max_length, 
-    #         return_tensors="pt"
-    #     )
-    #     outputs["labels"] = outputs["input_ids"].clone()
-    #     return outputs
 
     def tokenize_fn(examples):
         return tokenizer(examples["text"], return_special_tokens_mask=True)
@@ -104,6 +93,7 @@ def main():
         group_texts,
         batched=True,
         batch_size=1000,  # or something that merges enough examples to get a big chunk
+        remove_columns=["special_tokens_mask"]
     )
 
     # Now we have chunk_size-length examples
