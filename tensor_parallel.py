@@ -92,9 +92,9 @@ def main():
         
         "mp_size": 2,
         "optimizer": {
-            "type": "AdamW",
+            "type": "auto",
             "params": {
-                "lr": 0.0002
+                "lr": "auto"
             }
         },
         "fp16": {
